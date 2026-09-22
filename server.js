@@ -9,6 +9,7 @@ const root = fileURLToPath(new URL('.', import.meta.url));
 const publicDir = join(root, 'public');
 const dataDir = join(root, 'data');
 const stateFile = join(dataDir, 'monitor-state.json');
+const paperPortfolioFile = join(dataDir, 'paper-portfolio.json');
 const databaseFile = join(dataDir, 'alphapulse.db');
 const envFile = join(root, '.env');
 const port = Number(process.env.PORT || 4173);
@@ -49,6 +50,66 @@ const chainLiquidityHistory = new Map();
 const chainHolderState = new Map();
 let okxStream = null;
 let okxIntelStatus = { configured:false, status:'not_configured', lastEvent:0, ageMs:null, subscriptions:0, trackedTokens:0, error:null };
+const PAPER_CAPITAL = 100_000;
+let paperPortfolio = emptyPaperPortfolio();
+let paperPortfolioPersisted = false;
+
+function emptyPaperPortfolio() {
+  return { version:1, updatedAt:Date.now(), cash:PAPER_CAPITAL, positions:{}, realized:0, trades:[] };
+}
+
+function normalizePaperPortfolio(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  const positions = {};
+  for (const [address, position] of Object.entries(source.positions || {})) {
+    const qty = Number(position?.qty);
+    const avgCost = Number(position?.avgCost);
+    if (!address || !Number.isFinite(qty) || qty <= 0 || !Number.isFinite(avgCost) || avgCost < 0) continue;
+    positions[address] = {
+      symbol:String(position.symbol || ''), name:String(position.name || ''), qty,
+      avgCost, lastPrice:Number.isFinite(Number(position.lastPrice)) ? Number(position.lastPrice) : avgCost
+    };
+  }
+  return {
+    version:1,
+    updatedAt:Number.isFinite(Number(source.updatedAt)) ? Number(source.updatedAt) : Date.now(),
+    cash:Number.isFinite(Number(source.cash)) && Number(source.cash) >= 0 ? Number(source.cash) : PAPER_CAPITAL,
+    positions,
+    realized:Number.isFinite(Number(source.realized)) ? Number(source.realized) : 0,
+    trades:Array.isArray(source.trades) ? source.trades.slice(0,100) : []
+  };
+}
+
+async function loadPaperPortfolio() {
+  try {
+    paperPortfolio = normalizePaperPortfolio(JSON.parse(await readFile(paperPortfolioFile, 'utf8')));
+    paperPortfolioPersisted = true;
+    console.log(`Restored paper portfolio with ${Object.keys(paperPortfolio.positions).length} positions`);
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.error(`Paper portfolio restore failed: ${error.message}`);
+    paperPortfolio = emptyPaperPortfolio();
+    paperPortfolioPersisted = false;
+  }
+}
+
+async function persistPaperPortfolio() {
+  await mkdir(dataDir, { recursive:true });
+  const tempFile = `${paperPortfolioFile}.tmp`;
+  await writeFile(tempFile, JSON.stringify(paperPortfolio), 'utf8');
+  await rename(tempFile, paperPortfolioFile);
+  paperPortfolioPersisted = true;
+}
+
+async function readJsonBody(req, maxBytes=1_000_000) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > maxBytes) throw new Error('Request body too large');
+    chunks.push(chunk);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+}
 
 async function loadEnvironmentFile() {
   try {
@@ -992,6 +1053,17 @@ async function serveIcon(res, alphaId) {
 async function api(req, res, url) {
   if (url.pathname === '/api/stream') return serveLiveStream(req, res);
   if (url.pathname.startsWith('/api/icon/')) return serveIcon(res, decodeURIComponent(url.pathname.slice('/api/icon/'.length)));
+  if (url.pathname === '/api/paper-portfolio') {
+    if (req.method === 'GET') return json(res, { persisted:paperPortfolioPersisted, portfolio:paperPortfolio });
+    if (req.method !== 'PUT') {
+      res.setHeader('allow', 'GET, PUT');
+      return json(res, { error:'Method not allowed' }, 405);
+    }
+    const payload = await readJsonBody(req);
+    paperPortfolio = normalizePaperPortfolio({ ...payload, updatedAt:Date.now() });
+    await persistPaperPortfolio();
+    return json(res, { persisted:true, portfolio:paperPortfolio });
+  }
   if (url.pathname === '/api/health') {
     return json(res, {
       ok: true, version: '0.6.0', mode: 'unattended', pollingMs: CACHE_MS,
@@ -1064,6 +1136,7 @@ server.listen(port, '127.0.0.1', () => {
   startAlphaSocket();
   loadEnvironmentFile()
     .then(() => loadPersistentState())
+    .then(() => loadPaperPortfolio())
     .then(() => initializePerformanceDatabase())
     .then(() => startOkxChainIntel())
     .then(() => monitorTick())

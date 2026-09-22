@@ -13,6 +13,25 @@ const ALERT_MUTED_TOKENS_KEY = 'alpha-radar-alert-muted-tokens-v1';
 const ALERT_MUTED_RULES_KEY = 'alpha-radar-alert-muted-rules-v1';
 const COMPACT_KEY = 'alpha-radar-compact-v1';
 const PAPER_CAPITAL = 100_000;
+function emptyPaper() { return { updatedAt:Date.now(), cash:PAPER_CAPITAL, positions:{}, realized:0, trades:[] }; }
+function normalizePaper(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  const positions = {};
+  for (const [address, position] of Object.entries(source.positions || {})) {
+    const qty = Number(position?.qty), avgCost = Number(position?.avgCost);
+    if (!address || !Number.isFinite(qty) || qty <= 0 || !Number.isFinite(avgCost) || avgCost < 0) continue;
+    positions[address] = {
+      symbol:String(position.symbol || ''), name:String(position.name || ''), qty, avgCost,
+      lastPrice:Number.isFinite(Number(position.lastPrice)) ? Number(position.lastPrice) : avgCost
+    };
+  }
+  return {
+    updatedAt:Number.isFinite(Number(source.updatedAt)) ? Number(source.updatedAt) : Date.now(),
+    cash:Number.isFinite(Number(source.cash)) && Number(source.cash) >= 0 ? Number(source.cash) : PAPER_CAPITAL,
+    positions, realized:Number.isFinite(Number(source.realized)) ? Number(source.realized) : 0,
+    trades:Array.isArray(source.trades) ? source.trades.slice(0,100) : []
+  };
+}
 function loadStringSet(key) {
   try { return new Set(JSON.parse(localStorage.getItem(key)) || []); }
   catch { return new Set(); }
@@ -20,9 +39,9 @@ function loadStringSet(key) {
 function loadPaper() {
   try {
     const saved = JSON.parse(localStorage.getItem(PAPER_KEY));
-    if (saved && Number.isFinite(saved.cash) && saved.positions) return { cash:saved.cash, positions:saved.positions, realized:Number(saved.realized)||0, trades:saved.trades||[] };
+    if (saved && Number.isFinite(saved.cash) && saved.positions) return normalizePaper(saved);
   } catch {}
-  return { cash:PAPER_CAPITAL, positions:{}, realized:0, trades:[] };
+  return emptyPaper();
 }
 const state = {
   tokens: [], filtered: [], view: 'signals', action: 'all', query: '', page: 1,
@@ -366,8 +385,66 @@ function closePerformanceCenter() {
   $('performanceCenter').setAttribute('aria-hidden','true');
 }
 
+let paperSaveTimer = null;
+function hasPaperActivity(paper) {
+  return Object.keys(paper?.positions || {}).length > 0 || (paper?.trades || []).length > 0 ||
+    Number(paper?.cash) !== PAPER_CAPITAL || Number(paper?.realized) !== 0;
+}
+
+async function syncPaperToServer() {
+  try {
+    const response = await fetch('/api/paper-portfolio', {
+      method:'PUT', headers:{'content-type':'application/json'}, body:JSON.stringify(state.paper)
+    });
+    if (!response.ok) throw new Error('模拟仓同步失败');
+  } catch {}
+}
+
 function savePaper() {
+  state.paper.updatedAt = Date.now();
   try { localStorage.setItem(PAPER_KEY, JSON.stringify(state.paper)); } catch {}
+  clearTimeout(paperSaveTimer);
+  paperSaveTimer = setTimeout(syncPaperToServer, 150);
+}
+
+async function loadPaperFromServer() {
+  try {
+    const response = await fetch('/api/paper-portfolio');
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '模拟仓读取失败');
+    const localPaper = state.paper;
+    const remotePaper = normalizePaper(data.portfolio);
+    if ((!data.persisted || (hasPaperActivity(localPaper) && localPaper.updatedAt > remotePaper.updatedAt)) && hasPaperActivity(localPaper)) {
+      await syncPaperToServer();
+      return;
+    }
+    state.paper = remotePaper;
+    try { localStorage.setItem(PAPER_KEY, JSON.stringify(state.paper)); } catch {}
+    renderPortfolio();
+    if (typeof renderTable === 'function') renderTable();
+  } catch {}
+}
+
+function exportPaperPortfolio() {
+  const blob = new Blob([JSON.stringify({...state.paper, exportedAt:new Date().toISOString()}, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `alphapulse-paper-${new Date().toISOString().slice(0,10)}.json`;
+  link.click();
+  URL.revokeObjectURL(url);
+  showToast('模拟仓已导出');
+}
+
+async function importPaperPortfolio(file) {
+  if (!file) return;
+  try {
+    const imported = normalizePaper(JSON.parse(await file.text()));
+    if (!confirm('导入后会覆盖当前模拟仓，确定继续吗？')) return;
+    state.paper = {...imported, updatedAt:Date.now()};
+    savePaper(); renderPortfolio(); renderTable();
+    showToast('模拟仓已导入并同步');
+  } catch { showToast('导入文件格式不正确', true); }
 }
 
 function showToast(message, error=false) {
@@ -875,9 +952,12 @@ $('viewTabs').addEventListener('click', (e) => { if (!e.target.dataset.view) ret
 $('prevPage').addEventListener('click',()=>{if(state.page>1){state.page--;renderTable();}});
 $('nextPage').addEventListener('click',()=>{const pages=Math.ceil(state.filtered.length/state.pageSize);if(state.page<pages){state.page++;renderTable();}});
 $('refreshBtn').addEventListener('click',()=>loadTokens(true));
+$('exportPortfolio').addEventListener('click',exportPaperPortfolio);
+$('importPortfolio').addEventListener('click',()=>$('portfolioFile').click());
+$('portfolioFile').addEventListener('change',(event)=>{ importPaperPortfolio(event.target.files?.[0]); event.target.value=''; });
 $('resetPortfolio').addEventListener('click',()=>{
   if (!confirm('确定清空全部模拟持仓和交易记录，并恢复 100,000 USDT 吗？')) return;
-  state.paper = { cash:PAPER_CAPITAL, positions:{}, realized:0, trades:[] };
+  state.paper = emptyPaper();
   savePaper(); renderPortfolio(); renderTable(); showToast('模拟仓已重置');
 });
 $('rulesToggle').addEventListener('click',()=>{
@@ -948,6 +1028,7 @@ renderNotificationState();
 applyCompactMode();
 connectRealtime();
 loadAlerts();
+loadPaperFromServer();
 loadPerformance();
 loadTokens(true);
 setInterval(loadAlerts,15_000);

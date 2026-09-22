@@ -316,6 +316,7 @@ tbody tr:hover td:first-child { box-shadow: inset 2px 0 var(--green); }
 .paper-empty { border-radius: 9px; background: rgba(255,255,255,.012); }
 .paper-position { padding: 12px 8px; border-radius: 8px; }
 .paper-position:hover { background: rgba(145,247,157,.045); }
+.paper-actions { display:flex; align-items:center; gap:6px; }
 .feed-divider { margin-left: -24px; margin-right: -24px; background: var(--line); }
 .feed-item { margin: 0 -8px; padding: 15px 8px !important; border-radius: 9px; transition: background .18s ease, transform .18s ease; }
 .feed-item:hover { background: rgba(145,247,157,.04) !important; transform: translateX(2px); }
