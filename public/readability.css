@@ -1,0 +1,117 @@
+/* Final readability layer: larger type, stronger contrast, and a true narrow-screen table. */
+:root {
+  --muted: #aebbb4;
+  --line: rgba(174, 201, 185, .22);
+  --line-strong: rgba(174, 201, 185, .34);
+  --text: #f7fbf9;
+}
+
+body { font-size: 15px; font-weight: 500; }
+.brand strong { font-size: 15px; }
+.brand small { color: #a4b2aa; font-size: 11px; }
+.system-state { color: #b9c5bf; font-size: 12px; }
+.eyebrow { font-size: 11px; }
+
+.kpis span { color: #aab8b0; font-size: 12px; }
+.kpis small { color: #96a59d; font-size: 11px; }
+.kpis strong { font-size: 31px; }
+
+.section-head h2 { font-size: 27px; }
+.refresh-wrap { color: #aebbb4; font-size: 12px; }
+.search input { font-size: 14px; }
+.segments button, select, .rules-toggle { font-size: 13px; }
+
+th { color: #a8b6ae; font-size: 11px; }
+td { height: 78px; font-size: 14px; }
+.asset strong { font-size: 15px; }
+.asset small { color: #94a39b; font-size: 11px; }
+.score b { font-size: 17px; }
+.price { font-size: 13px; }
+.delta { font-size: 12px; }
+.metric { font-size: 13px; }
+td > small, .metric small { color: #929f98; font-size: 11px; }
+.action { font-size: 11px; }
+.stage { font-size: 10px; }
+.pagination { font-size: 12px; }
+
+.pulse-label { font-size: 11px; }
+.feed-token b, .feed-score, .feed-item p { font-size: 13px; }
+.feed-item small, .method-note b, .method-note p { font-size: 11px; }
+.paper-equity span, .paper-equity small, .paper-positions-head { font-size: 12px; }
+.paper-stats span, .paper-position small, .paper-empty { font-size: 11px; }
+.paper-stats b, .paper-position strong, .paper-position > b { font-size: 13px; }
+
+.drawer-asset p, .detail-grid span, .reason-columns li, .range-label { font-size: 12px; }
+.detail-grid b { font-size: 15px; }
+.verdict h3, .reason-columns h4 { font-size: 13px; }
+.verdict p { font-size: 14px; }
+.journey-head span, .journey-events-head span, .journey-stats span,
+.journey-event p, .journey-no-events, .chain-intel-grid span,
+.chain-intel-grid small, .chain-intel-note, .chain-intel-setup p,
+.alert-toolbar, .mute-summary, .alert-note, .performance-kpis span,
+.performance-kpis small, .performance-section-head small,
+.performance-note { font-size: 11px; }
+.journey-event b, .chain-intel-setup b, .performance-recent-item b { font-size: 12px; }
+.performance-table-head { font-size: 10px; }
+
+@media (max-width: 760px) {
+  body { font-size: 16px; }
+  main, footer { width: calc(100% - 16px); }
+  .topbar { padding: 0 10px; }
+  .kpis span { font-size: 12px; }
+  .kpis small { font-size: 11px; line-height: 1.45; }
+  .kpis strong { font-size: 27px; }
+  .board, .signal-feed { padding: 20px 14px; }
+  .section-head { align-items: flex-start; gap: 14px; }
+  .section-head h2 { font-size: 28px; }
+  .filters { gap: 10px; }
+  .search { height: 46px; }
+  .segments { min-height: 44px; }
+  .segments button { min-height: 38px; font-size: 13px; }
+  select { min-height: 42px; font-size: 13px; }
+  .table-wrap { margin-right: 0; overflow-x: hidden; }
+  table { width: 100%; min-width: 0; table-layout: fixed; }
+  th:nth-child(1), td:nth-child(1) { width: 43%; }
+  th:nth-child(2), td:nth-child(2) { width: 23%; }
+  th:nth-child(3), td:nth-child(3) { width: 34%; }
+  th:nth-child(n+4), td:nth-child(n+4) { display: none; }
+  th { height: 48px; font-size: 11px; }
+  td { height: 84px; padding-right: 7px; font-size: 14px; }
+  .asset { min-width: 0; gap: 8px; }
+  .asset > div { min-width: 0; }
+  .asset strong, .asset small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .asset strong { font-size: 14px; }
+  .asset small { font-size: 10px; }
+  .token-icon-shell { width: 34px; height: 34px; border-radius: 9px; }
+  .score { gap: 5px; }
+  .score b { font-size: 16px; }
+  .score-track { width: 38px; }
+  .price-spark-cell { min-width: 0; justify-content: flex-start; }
+  .mini-spark { display: none; }
+  .price { font-size: 12px; }
+  .delta { font-size: 11px; }
+  .pagination { font-size: 12px; }
+  .rule-grid { grid-template-columns: 1fr; }
+  .rule-grid label > span, .rule-checks label { font-size: 12px; }
+  .rule-grid small, .rule-summary { font-size: 11px; }
+}
+
+@media (max-width: 380px) {
+  .topbar { height: 64px; }
+  .brand { gap: 7px; }
+  .brand-mark { width: 34px; height: 34px; }
+  .brand strong { font-size: 13px; letter-spacing: .14em; }
+  .top-actions { gap: 4px; }
+  .system-state { display: none; }
+  .compact-toggle, .performance-button, .alert-button { width: 34px; height: 34px; }
+  .kpis article { min-height: 112px; padding: 18px 13px; }
+  .section-head { flex-wrap: wrap; }
+  .refresh-wrap { width: 100%; justify-content: flex-start; }
+  .filters { padding: 6px; }
+  .segments button { padding: 0 7px; font-size: 12px; }
+  .asset strong { font-size: 13px; }
+  .asset small { font-size: 9px; }
+  .token-icon-shell { width: 31px; height: 31px; }
+  .score-track { width: 30px; }
+  .price { font-size: 11px; }
+}

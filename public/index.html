@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
+  <title>AlphaPulse · 阿尔法脉冲</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/legibility.css" />
+  <link rel="stylesheet" href="/polish.css" />
+  <link rel="stylesheet" href="/readability.css" />
+</head>
+<body>
+  <div class="noise"></div>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark"><span></span><span></span><span></span><span></span><span></span></div>
+      <div><strong>ALPHA<span>PULSE</span></strong><small>阿尔法脉冲 · 链上异动监控</small></div>
+    </div>
+    <div class="top-actions">
+      <button class="compact-toggle" id="compactToggle" aria-pressed="false" title="切换紧凑监控模式">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M5 12h14M5 17h14"/></svg><span>紧凑模式</span>
+      </button>
+      <button class="performance-button" id="performanceButton" aria-label="打开策略验证中心">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V9m6 10V5m6 14v-7m4 7H2"/></svg>
+        <span>策略验证</span><b id="performanceSampleBadge">0</b>
+      </button>
+      <button class="alert-button" id="alertsButton" aria-label="打开异动提醒中心">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg>
+        <span>异动提醒</span><b id="alertUnread">0</b>
+      </button>
+      <div class="system-state"><i id="statusDot"></i><span id="systemText">正在连接数据源</span><b id="clock">--:--:--</b></div>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div>
+        <p class="eyebrow">BINANCE ALPHA · BSC / CHAIN 56</p>
+        <h1>在价格爆发之前，<br><em>先看见资金的动作。</em></h1>
+        <p class="hero-copy">监控 Binance Alpha 资产的量价、流动性、换手与持仓结构，并用实时价格验证模拟策略。不连接钱包，不自动交易。</p>
+        <div class="hero-meta">
+          <span><i></i> WebSocket 实时行情</span>
+          <span>BSC · Chain 56</span>
+          <span>Paper Trading</span>
+        </div>
+      </div>
+      <div class="radar-panel" aria-hidden="true">
+        <div class="radar-ring r1"></div><div class="radar-ring r2"></div><div class="radar-ring r3"></div>
+        <div class="radar-line"></div><div class="radar-core"></div>
+        <span class="blip b1"></span><span class="blip b2"></span><span class="blip b3"></span>
+        <div class="radar-copy"><b id="heroSignalCount">0</b><span>活跃信号</span></div>
+      </div>
+    </section>
+
+    <section class="kpis" id="kpis">
+      <article><span>监控资产</span><strong id="totalTokens">—</strong><small>Binance Alpha · BSC</small></article>
+      <article><span>强信号</span><strong id="strongSignals">—</strong><small>评分 ≥ 78</small></article>
+      <article><span>高风险</span><strong id="riskSignals">—</strong><small>薄池 / 高换手 / 回撤</small></article>
+      <article><span>24H 成交额</span><strong id="totalVolume">—</strong><small>监控池合计</small></article>
+    </section>
+
+    <section class="workspace">
+      <div class="board">
+        <div class="section-head">
+          <div><p class="eyebrow">LIVE SIGNAL BOARD</p><h2>实时异动榜</h2></div>
+          <div class="refresh-wrap"><span id="updatedAt">等待首个快照</span><button id="rulesToggle" class="rules-toggle">筛选规则 <b id="activeRuleCount">0</b></button><button id="refreshBtn" class="icon-btn" title="立即刷新">↻</button></div>
+        </div>
+
+        <div class="filters">
+          <label class="search"><span>⌕</span><input id="searchInput" placeholder="搜索代币、符号或合约地址" /></label>
+          <div class="segments" id="viewTabs">
+            <button class="active" data-view="signals">异动优先</button>
+            <button data-view="gainers">拉升榜</button>
+            <button data-view="turnover">资金热度</button>
+            <button data-view="risk">风险榜</button>
+          </div>
+          <select id="actionFilter" aria-label="建议信号筛选">
+            <option value="all">全部建议</option>
+            <option value="试仓">试仓</option>
+            <option value="重点观察">重点观察</option>
+            <option value="减仓">减仓</option>
+            <option value="回避">回避</option>
+          </select>
+        </div>
+
+        <section class="rules-panel" id="rulesPanel" hidden>
+          <div class="rules-head">
+            <div><p class="eyebrow">SCREENING ENGINE</p><h3>高级筛选规则</h3><span>先寻找链上异动，再过滤不可交易的噪声。</span></div>
+            <button id="resetRules">重置规则</button>
+          </div>
+          <div class="presets" id="presets">
+            <button data-preset="breakout">早期异动</button>
+            <button data-preset="confirmed">可交易确认</button>
+            <button data-preset="ake">AKE 类异常</button>
+            <button data-preset="safe">稳健筛选</button>
+            <button data-preset="flowStart" class="pro-preset">资金启动</button>
+            <button data-preset="trendConfirm" class="pro-preset">多周期确认</button>
+            <button data-preset="antiFomo" class="pro-preset">防追高</button>
+            <button data-preset="onchainConfirm" class="pro-preset">链上资金确认</button>
+          </div>
+          <div class="rule-grid">
+            <label><span>最低评分</span><input id="ruleMinScore" type="number" min="0" max="100" value="0"><small>0–100</small></label>
+            <label><span>最低流动性</span><input id="ruleMinLiquidity" type="number" min="0" value="0"><small>千美元</small></label>
+            <label><span>最低市值</span><input id="ruleMinMarketCap" type="number" min="0" value="0"><small>百万美元</small></label>
+            <label><span>最低持币地址</span><input id="ruleMinHolders" type="number" min="0" value="0"><small>地址数</small></label>
+            <label><span>24H 最低涨幅</span><input id="ruleMinChange" type="number" value="-100"><small>%</small></label>
+            <label><span>24H 最高涨幅</span><input id="ruleMaxChange" type="number" value="10000"><small>%</small></label>
+            <label><span>最低换手强度</span><input id="ruleMinTurnover" type="number" min="0" value="0"><small>成交额/市值 %</small></label>
+            <label><span>最高 FDV/市值</span><input id="ruleMaxDilution" type="number" min="1" step="0.5" value="100"><small>倍</small></label>
+            <label><span>5分钟最低涨幅</span><input id="ruleMinChange5m" type="number" value="-100" step="0.1"><small>%</small></label>
+            <label><span>5分钟资金强度</span><input id="ruleMinFlow5m" type="number" min="0" value="0" step="0.1"><small>增量/市值 %</small></label>
+            <label><span>日内最大振幅</span><input id="ruleMaxRange" type="number" min="0" value="10000"><small>%</small></label>
+            <label><span>最低监控样本</span><input id="ruleMinSamples" type="number" min="0" value="0"><small>分钟</small></label>
+            <label><span>Smart Money 净流入</span><input id="ruleMinSmartNet" type="number" min="0" value="0"><small>15分钟 · 千美元</small></label>
+            <label><span>大额 Swap 净流入</span><input id="ruleMinLargeSwap" type="number" min="0" value="0"><small>15分钟 · 千美元</small></label>
+            <label><span>池子最低变化</span><input id="ruleMinLiquidityChange" type="number" value="-100" step="0.5"><small>5分钟 %</small></label>
+            <label><span>Top10 最高持仓</span><input id="ruleMaxTop10" type="number" min="0" max="100" value="100"><small>%</small></label>
+          </div>
+          <div class="rule-checks">
+            <label><input id="ruleExcludeThin" type="checkbox">排除流动性极薄</label>
+            <label><input id="ruleExcludeBots" type="checkbox">排除疑似机器人</label>
+            <label><input id="ruleExcludeDilution" type="checkbox">排除低流通高 FDV</label>
+            <label><input id="ruleOnlyQuality" type="checkbox">仅看高质量信号</label>
+            <label><input id="ruleRequireConfluence" type="checkbox">要求多周期共振</label>
+            <label><input id="ruleRequireAcceleration" type="checkbox">要求成交增量加速</label>
+            <label><input id="ruleExcludeExhaustion" type="checkbox">排除动量衰竭</label>
+            <label><input id="ruleExcludeNew" type="checkbox">排除上线不足24小时</label>
+          </div>
+          <div class="rule-summary" id="ruleSummary">当前未启用额外规则</div>
+        </section>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>资产</th><th>异动评分</th><th>价格 / 24H</th><th>成交额</th><th>流动性</th><th>换手强度</th><th>建议</th></tr></thead>
+            <tbody id="tokenRows"><tr><td colspan="7" class="loading">正在读取 Binance Alpha 资产池…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="pagination"><span id="resultCount">—</span><div><button id="prevPage">←</button><span id="pageNo">1 / 1</span><button id="nextPage">→</button></div></div>
+      </div>
+
+      <aside class="signal-feed">
+        <section class="paper-card">
+          <div class="section-head compact"><div><p class="eyebrow">PAPER PORTFOLIO</p><h2>模拟仓</h2></div><button id="resetPortfolio" class="paper-reset">重置</button></div>
+          <div class="paper-equity"><span>账户权益</span><strong id="paperEquity">$100K</strong><small id="paperTotalPnl">总盈亏 $0.00</small></div>
+          <div class="paper-stats"><div><span>可用资金</span><b id="paperCash">$100K</b></div><div><span>浮动盈亏</span><b id="paperUnrealized">$0.00</b></div></div>
+          <div class="paper-positions-head"><span>当前持仓</span><b id="paperPositionCount">0</b></div>
+          <div id="paperPositions" class="paper-positions"><div class="paper-empty">点击榜单资产，在详情中模拟买入</div></div>
+        </section>
+        <div class="feed-divider"></div>
+        <div class="section-head compact"><div><p class="eyebrow">NOW</p><h2>信号流</h2></div><span class="pulse-label"><i></i> LIVE</span></div>
+        <div id="feed" class="feed-list"><div class="loading">等待首个快照…</div></div>
+        <div class="method-note"><b>评分说明</b><p>价格与成交只是触发器；薄流动性、高换手和低流通会降低建议等级。模拟仓不产生真实交易。</p></div>
+      </aside>
+    </section>
+  </main>
+
+  <div class="drawer-backdrop" id="drawerBackdrop"></div>
+  <aside class="drawer" id="drawer" aria-hidden="true">
+    <button class="drawer-close" id="drawerClose">×</button>
+    <div id="drawerContent"></div>
+  </aside>
+
+  <div class="alert-backdrop" id="alertBackdrop"></div>
+  <aside class="alert-center" id="alertCenter" aria-hidden="true">
+    <div class="alert-center-head">
+      <div><p class="eyebrow">SIGNAL ALERTS</p><h2>异动提醒中心</h2><span>后台持续记录，自动合并重复信号</span></div>
+      <button class="alert-close" id="alertClose" aria-label="关闭提醒中心">×</button>
+    </div>
+    <button class="notification-toggle" id="notificationToggle">
+      <span><i></i><b>桌面通知</b><small id="notificationStatus">尚未开启</small></span><em>设置</em>
+    </button>
+    <div class="alert-tabs" id="alertTabs">
+      <button class="active" data-alert-filter="all">全部</button>
+      <button data-alert-filter="high">高优先</button>
+      <button data-alert-filter="opportunity">机会</button>
+      <button data-alert-filter="risk">风险</button>
+    </div>
+    <div class="alert-toolbar"><span>已按币种合并重复提醒</span><button id="markAlertsRead">全部已读</button></div>
+    <div class="mute-summary" id="muteSummary" hidden><span id="muteSummaryText"></span><button id="clearAlertMutes">全部恢复</button></div>
+    <div class="alert-list" id="alertList"><div class="alert-empty">正在读取后台告警记录…</div></div>
+    <div class="alert-note"><i></i><span>提醒用于研究筛查，不会自动执行交易。</span></div>
+  </aside>
+
+  <div class="performance-backdrop" id="performanceBackdrop"></div>
+  <aside class="performance-center" id="performanceCenter" aria-hidden="true">
+    <div class="performance-center-head">
+      <div><p class="eyebrow">SIGNAL PERFORMANCE</p><h2>策略验证中心</h2><span>自动追踪每次异动后的真实价格表现</span></div>
+      <button class="performance-close" id="performanceClose" aria-label="关闭策略验证中心">×</button>
+    </div>
+    <div class="performance-tabs" id="performanceTabs">
+      <button data-horizon="5m">5 分钟</button>
+      <button class="active" data-horizon="15m">15 分钟</button>
+      <button data-horizon="1h">1 小时</button>
+      <button data-horizon="4h">4 小时</button>
+    </div>
+    <section class="performance-kpis">
+      <article><span>累计信号</span><strong id="performanceTotal">—</strong><small>SQLite 长期记录</small></article>
+      <article><span>完成样本</span><strong id="performanceCompleted">—</strong><small id="performanceTracking">正在追踪 —</small></article>
+      <article><span>方向胜率</span><strong id="performanceWinRate">—</strong><small>风险信号按下跌验证</small></article>
+      <article><span>平均效果</span><strong id="performanceAverage">—</strong><small>按信号方向归一化</small></article>
+    </section>
+    <div class="performance-section-head"><div><span>规则表现</span><small id="performanceRuleNote">按 15 分钟结果统计</small></div><em>至少 5 个样本后再做判断</em></div>
+    <div class="performance-table">
+      <div class="performance-table-head"><span>监控规则</span><span>样本</span><span>胜率</span><span>平均效果</span><span>有利波动</span><span>不利波动</span><span>状态</span></div>
+      <div id="performanceRules"><div class="performance-empty">正在建立策略样本…</div></div>
+    </div>
+    <div class="performance-section-head recent-head"><div><span>最近完成样本</span><small>自动写入，无需手动复盘</small></div><em id="performanceSnapshots">— 分钟快照</em></div>
+    <div class="performance-recent" id="performanceRecent"><div class="performance-empty">等待首个观察周期完成</div></div>
+    <div class="performance-note"><i></i><span>胜率和收益仅反映已记录的历史样本，不保证未来表现，也不会触发真实交易。</span></div>
+  </aside>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <footer><span>ALPHAPULSE / PAPER MODE</span><span>价格：Binance Alpha WebSocket 实时推送 · 5 秒指标校准</span><span>模拟交易 · 不构成投资建议</span></footer>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
