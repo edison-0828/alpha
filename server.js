@@ -3,12 +3,15 @@ import { readFile, stat, mkdir, writeFile, rename } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { gzip as gzipCallback, gunzip as gunzipCallback } from 'node:zlib';
+import { promisify } from 'node:util';
 import { OkxChainIntelStream } from './okx-chain-intel.js';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const publicDir = join(root, 'public');
 const dataDir = join(root, 'data');
-const stateFile = join(dataDir, 'monitor-state.json');
+const legacyStateFile = join(dataDir, 'monitor-state.json');
+const stateFile = join(dataDir, 'monitor-state.json.gz');
 const paperPortfolioFile = join(dataDir, 'paper-portfolio.json');
 const databaseFile = join(dataDir, 'alphapulse.db');
 const envFile = join(root, '.env');
@@ -20,16 +23,23 @@ const LIVE_PRICE_MAX_AGE_MS = 4_000;
 const LIVE_BROADCAST_MS = 80;
 const MAX_HISTORY = 240;
 const MAX_ALERTS = 300;
+const STATE_PERSIST_MS = 5 * 60_000;
 const ALERT_COOLDOWN_MS = 30 * 60_000;
 const PERFORMANCE_HORIZONS = { '5m':5 * 60_000, '15m':15 * 60_000, '1h':60 * 60_000, '4h':4 * 60 * 60_000 };
-const SNAPSHOT_RETENTION_MS = 7 * 24 * 60 * 60_000;
+const SNAPSHOT_RETENTION_MS = 2 * 24 * 60 * 60_000;
 const SIGNAL_RETENTION_MS = 90 * 24 * 60 * 60_000;
+const PRIORITY_SNAPSHOT_SCORE = 50;
+const MARKET_SNAPSHOT_INTERVAL_MS = 5 * 60_000;
+const SIGNAL_EVALUATION_INTERVAL_MS = 15_000;
 const CHAIN_INTEL_WINDOW_MS = 15 * 60_000;
+const gzip = promisify(gzipCallback);
+const gunzip = promisify(gunzipCallback);
 
 let cache = { fetchedAt: 0, tokens: [], source: 'loading', error: null };
 const histories = new Map();
 let monitorBusy = false;
 let persistTimer = null;
+let shuttingDown = false;
 let alphaSocket = null;
 let alphaSocketStatus = 'connecting';
 let alphaSocketLastEvent = 0;
@@ -47,6 +57,9 @@ let alertEnginePrimed = false;
 let alertSequence = 0;
 let performanceDb = null;
 let lastDatabasePruneAt = 0;
+let lastPrioritySnapshotBucketAt = 0;
+let lastMarketSnapshotAt = 0;
+let lastSignalEvaluationAt = 0;
 const chainEventLog = new Map();
 const chainLiquidityHistory = new Map();
 const chainHolderState = new Map();
@@ -130,8 +143,20 @@ async function loadEnvironmentFile() {
 
 async function loadPersistentState() {
   try {
-    const saved = JSON.parse(await readFile(stateFile, 'utf8'));
-    for (const [key, rows] of saved.histories || []) histories.set(key, Array.isArray(rows) ? rows.slice(-MAX_HISTORY) : []);
+    let saved;
+    try {
+      saved = JSON.parse((await gunzip(await readFile(stateFile))).toString('utf8'));
+    } catch (error) {
+      if (error.code !== 'ENOENT') console.error(`Compressed state restore failed: ${error.message}; trying legacy state`);
+      saved = JSON.parse(await readFile(legacyStateFile, 'utf8'));
+    }
+    for (const [key, rows] of saved.histories || []) {
+      const normalized = Array.isArray(rows) ? rows.slice(-MAX_HISTORY).map((row) => Array.isArray(row)
+        ? { t:Number(row[0]) || 0, price:Number(row[1]) || 0, volume:Number(row[2]) || 0, score:Number(row[3]) || 0 }
+        : row
+      ).filter((row) => row?.t && row?.price) : [];
+      histories.set(key, normalized);
+    }
     for (const item of saved.alerts || []) alerts.push(item);
     if (alerts.length > MAX_ALERTS) alerts.splice(0, alerts.length - MAX_ALERTS);
     for (const [key, value] of saved.alertStates || []) alertStates.set(key, value);
@@ -268,7 +293,8 @@ async function initializePerformanceDatabase() {
   withDatabaseTransaction(() => {
     for (const alert of alerts) insertSignalRecord(alert);
   });
-  backfillHistoricalSnapshots();
+  const snapshotCount = performanceDb.prepare('SELECT COUNT(*) AS count FROM price_snapshots').get().count;
+  if (!snapshotCount) backfillHistoricalSnapshots();
   restoreChainIntelFromDatabase();
   console.log(`Performance database ready at ${databaseFile}`);
 }
@@ -276,6 +302,14 @@ async function initializePerformanceDatabase() {
 function storeMinuteSnapshots(tokens, now) {
   if (!performanceDb) return;
   const bucketAt = Math.floor(now / 60_000) * 60_000;
+  const priorityDue = bucketAt !== lastPrioritySnapshotBucketAt;
+  const marketDue = !lastMarketSnapshotAt || bucketAt - lastMarketSnapshotAt >= MARKET_SNAPSHOT_INTERVAL_MS;
+  if (!priorityDue && !marketDue) return;
+  if (priorityDue) lastPrioritySnapshotBucketAt = bucketAt;
+  if (marketDue) lastMarketSnapshotAt = bucketAt;
+  const recentAddresses = new Set(alerts
+    .filter((item) => item.createdAt > now - PERFORMANCE_HORIZONS['4h'])
+    .map((item) => item.address));
   const statement = performanceDb.prepare(`
     INSERT INTO price_snapshots (address, bucket_at, price, volume, score, recorded_at)
     VALUES (?, ?, ?, ?, ?, ?)
@@ -284,7 +318,13 @@ function storeMinuteSnapshots(tokens, now) {
   `);
   withDatabaseTransaction(() => {
     for (const token of tokens) {
-      if (token.chainId === '56' && token.address && token.price > 0) statement.run(token.address, bucketAt, token.price, token.volume24h, token.score, now);
+      if (token.chainId !== '56' || !token.address || token.price <= 0) continue;
+      const priority = token.score >= PRIORITY_SNAPSHOT_SCORE
+        || Boolean(paperPortfolio.positions[token.address])
+        || recentAddresses.has(token.address);
+      if ((priority && priorityDue) || (!priority && marketDue)) {
+        statement.run(token.address, bucketAt, token.price, token.volume24h, token.score, now);
+      }
     }
   });
 }
@@ -345,13 +385,17 @@ function prunePerformanceDatabase(now) {
   performanceDb.prepare('DELETE FROM signals WHERE created_at < ?').run(now - SIGNAL_RETENTION_MS);
   performanceDb.prepare('DELETE FROM chain_events WHERE event_at < ?').run(now - SNAPSHOT_RETENTION_MS);
   performanceDb.prepare('DELETE FROM chain_metrics WHERE bucket_at < ?').run(now - SNAPSHOT_RETENTION_MS);
+  try { performanceDb.exec('PRAGMA optimize; PRAGMA wal_checkpoint(PASSIVE);'); } catch {}
 }
 
 function recordPerformanceData(tokens, now) {
   if (!performanceDb) return;
   try {
     storeMinuteSnapshots(tokens, now);
-    updateSignalPerformance(tokens, now);
+    if (now - lastSignalEvaluationAt >= SIGNAL_EVALUATION_INTERVAL_MS) {
+      lastSignalEvaluationAt = now;
+      updateSignalPerformance(tokens, now);
+    }
     prunePerformanceDatabase(now);
   } catch (error) {
     console.error(`Performance tracking failed: ${error.message}`);
@@ -565,23 +609,32 @@ function startOkxChainIntel() {
   okxStream.start();
 }
 
+async function persistState() {
+  try {
+    await mkdir(dataDir, { recursive: true });
+    const tempFile = `${stateFile}.tmp`;
+    const compactHistories = [...histories.entries()].map(([key, rows]) => [
+      key,
+      rows.slice(-MAX_HISTORY).map((row) => [row.t, row.price, row.volume || 0, row.score || 0])
+    ]);
+    const payload = JSON.stringify({
+      version:2, savedAt:Date.now(), histories:compactHistories, alerts,
+      alertStates:[...alertStates.entries()], firstSignalAt:[...firstSignalAt.entries()]
+    });
+    const compressed = await gzip(payload, { level:6 });
+    await writeFile(tempFile, compressed);
+    await rename(tempFile, stateFile);
+  } catch (error) {
+    console.error(`State persist failed: ${error.message}`);
+  }
+}
+
 function schedulePersist() {
   if (persistTimer) return;
   persistTimer = setTimeout(async () => {
     persistTimer = null;
-    try {
-      await mkdir(dataDir, { recursive: true });
-      const tempFile = `${stateFile}.tmp`;
-      const payload = JSON.stringify({
-        savedAt:Date.now(), histories:[...histories.entries()], alerts,
-        alertStates:[...alertStates.entries()], firstSignalAt:[...firstSignalAt.entries()]
-      });
-      await writeFile(tempFile, payload, 'utf8');
-      await rename(tempFile, stateFile);
-    } catch (error) {
-      console.error(`State persist failed: ${error.message}`);
-    }
-  }, 30_000);
+    await persistState();
+  }, STATE_PERSIST_MS);
 }
 
 function flushLiveUpdates() {
@@ -732,7 +785,7 @@ function applyLiveTicker(row) {
 }
 
 function scheduleSocketReconnect() {
-  if (alphaSocketReconnect) return;
+  if (shuttingDown || alphaSocketReconnect) return;
   alphaSocketReconnect = setTimeout(() => {
     alphaSocketReconnect = null;
     startAlphaSocket();
@@ -758,7 +811,7 @@ function startAlphaSocket() {
       } catch (error) { console.error(`Realtime message failed: ${error.message}`); }
     });
     alphaSocket.addEventListener('close', () => {
-      alphaSocketStatus = 'reconnecting'; alphaSocket = null; scheduleSocketReconnect();
+      alphaSocketStatus = shuttingDown ? 'stopped' : 'reconnecting'; alphaSocket = null; scheduleSocketReconnect();
     });
     alphaSocket.addEventListener('error', () => {
       alphaSocketStatus = 'error';
@@ -1080,7 +1133,7 @@ async function api(req, res, url) {
   }
   if (url.pathname === '/api/health') {
     return json(res, {
-      ok: true, version: '0.6.1', mode: 'unattended', pollingMs: CACHE_MS,
+      ok: true, version: '0.7.0', mode: 'unattended', pollingMs: CACHE_MS,
       now: Date.now(), lastRefresh: cache.fetchedAt, cachedTokens: cache.tokens.length,
       histories: histories.size, alerts:alerts.length, performanceDatabase:Boolean(performanceDb), source: cache.source, error: cache.error,
       chainIntel: { ...okxIntelStatus, eventTokens:chainEventLog.size, liquidityTokens:chainLiquidityHistory.size, holderTokens:chainHolderState.size },
@@ -1092,6 +1145,15 @@ async function api(req, res, url) {
         freshTracked: [...livePrices.values()].filter((item) => Date.now() - (item.receivedAt || item.eventTime) <= LIVE_PRICE_MAX_AGE_MS).length,
         maxPriceAgeMs: LIVE_PRICE_MAX_AGE_MS,
         clients: sseClients.size
+      },
+      storage: {
+        statePersistMs:STATE_PERSIST_MS,
+        snapshotRetentionMs:SNAPSHOT_RETENTION_MS,
+        prioritySnapshotScore:PRIORITY_SNAPSHOT_SCORE,
+        marketSnapshotMs:MARKET_SNAPSHOT_INTERVAL_MS,
+        signalEvaluationMs:SIGNAL_EVALUATION_INTERVAL_MS,
+        lastPrioritySnapshotAt:lastPrioritySnapshotBucketAt || null,
+        lastMarketSnapshotAt:lastMarketSnapshotAt || null
       }
     });
   }
@@ -1159,3 +1221,25 @@ server.listen(port, '127.0.0.1', () => {
     .then(() => console.log(`Loaded ${cache.tokens.length} Binance Alpha tokens; unattended monitor active`));
   setInterval(monitorTick, CACHE_MS);
 });
+
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Received ${signal}; saving state before shutdown`);
+  if (persistTimer) clearTimeout(persistTimer);
+  if (alphaSocketReconnect) clearTimeout(alphaSocketReconnect);
+  try { okxStream?.stop(); } catch {}
+  try { alphaSocket?.close(); } catch {}
+  for (const client of [...sseClients]) {
+    try { client.end(); } catch {}
+  }
+  await persistState();
+  try { performanceDb?.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {}
+  try { performanceDb?.close(); } catch {}
+  server.close(() => process.exit(0));
+  const forceExit = setTimeout(() => process.exit(0), 5_000);
+  forceExit.unref();
+}
+
+process.once('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));

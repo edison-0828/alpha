@@ -7,7 +7,7 @@ Binance Alpha（BSC）链上异动监控控制台第一版。它通过 Binance A
 需要 Node.js 22 或更高版本，无需安装第三方依赖：
 
 ```powershell
-cd D:\codex\2026-09-21\z\outputs\alpha-radar
+cd D:\Alpha
 npm start
 ```
 
@@ -22,7 +22,7 @@ npm start
 - 试仓、重点观察、减仓、回避四级建议
 - 单币详情、24 小时区间、评分正负因素
 - 信号复盘面板：15 分钟价格轨迹、首次异动价、信号后涨跌与最近 6 条异动事件时间线
-- SQLite 策略数据库：分钟快照保留 7 天，信号与结果保留 90 天
+- SQLite 策略数据库：分层价格快照保留 2 天，信号与结果保留 90 天
 - 自动记录每次信号在 5 分钟、15 分钟、1 小时和 4 小时后的价格表现
 - 策略验证中心：规则样本量、方向胜率、平均效果、有利波动和不利波动
 - OKX Onchain OS WebSocket 链上资金层：Smart Money、KOL、大额 Swap 与池子流动性变化
@@ -38,9 +38,11 @@ npm start
 - 可选浏览器桌面通知（需在页面中手动授权）
 - 按币种合并提醒、高优先级筛选、全部已读、币种/规则静音
 - 可记忆的紧凑监控模式与榜单 5 分钟迷你价格曲线
-- 100,000 USDT 本地模拟仓、实时估值、持仓均价和浮动盈亏
+- 100,000 USDT 服务端持久化模拟仓、实时估值、持仓均价、盈亏额与盈亏率
 - 服务端持续接收实时行情并每 5 秒主动校准，网页关闭后仍持续监控
 - Windows 登录自启、异常自动重启和历史状态落盘
+- 分层策略快照：持仓/高评分/近期告警每分钟记录，普通资产每 5 分钟记录
+- Gzip 紧凑历史状态、五分钟状态落盘和 15 秒策略结果评估
 
 ## Windows 常驻监控
 
@@ -49,11 +51,31 @@ npm start
 检查后台状态：
 
 ```powershell
-cd D:\codex\2026-09-21\z\outputs\alpha-radar
+cd D:\Alpha
 .\scripts\status-alphapulse.ps1
 ```
 
-运行日志位于 `logs\service.log`，快速恢复状态位于 `data\monitor-state.json`，策略分析数据库位于 `data\alphapulse.db`。
+运行日志位于 `logs\service.log`，快速恢复状态优先使用 `data\monitor-state.json.gz`（旧版 `monitor-state.json` 可自动迁移），策略分析数据库位于 `data\alphapulse.db`。
+
+## Grok Bot 云端常驻
+
+项目目录为 `/workspace/alphapulse`。更新并重启：
+
+```bash
+cd /workspace/alphapulse
+git pull --ff-only origin main
+bash scripts/cloud-service.sh restart
+bash scripts/cloud-service.sh status
+```
+
+云端守护脚本会使用 Node 22、记录独立 PID、异常退出后 5 秒重启，并在正常停止时保存状态。健康检查与一致性备份：
+
+```bash
+bash /workspace/alphapulse/scripts/cloud-healthcheck.sh
+bash /workspace/alphapulse/scripts/backup-cloud.sh
+```
+
+备份默认保存在 `/workspace/alphapulse-backups/<UTC时间>/`，包含模拟仓、压缩监控状态和通过 SQLite `VACUUM INTO` 生成的一致性数据库副本；默认保留 14 天。建议在 Grok Bot 中创建两个 Routine：每 5 分钟运行健康检查（成功时保持静默，恢复失败时通知），每天运行一次备份。
 
 ## OKX 链上资金数据
 
@@ -62,7 +84,7 @@ Smart Money 和逐笔 Swap 数据通过 OKX Onchain OS 官方 WebSocket 接入�
 在 PowerShell 中运行交互式配置：
 
 ```powershell
-cd D:\codex\2026-09-21\z\outputs\alpha-radar
+cd D:\Alpha
 .\scripts\configure-okx-chain-intel.ps1
 ```
 
