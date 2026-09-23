@@ -11,6 +11,8 @@ try {
     Alerts = $health.alerts
     StrategyDatabase = if ($health.performanceDatabase) { 'READY' } else { 'NOT READY' }
     ChainIntel = if ($health.chainIntel.configured) { "$($health.chainIntel.status) · $($health.chainIntel.trackedTokens) tokens" } else { 'NOT CONFIGURED' }
+    AutoTrading = if ($health.trading.enabled) { "PAPER ACTIVE · $($health.trading.managedPositions) positions" } else { 'PAPER PAUSED' }
+    LiveTrading = if ($health.trading.liveExecution) { 'ENABLED' } else { 'LOCKED · CONFIRMATION REQUIRED' }
     Source = $health.source
     Error = $health.error
   } | Format-List

@@ -6,6 +6,10 @@ import { DatabaseSync } from 'node:sqlite';
 import { gzip as gzipCallback, gunzip as gunzipCallback } from 'node:zlib';
 import { promisify } from 'node:util';
 import { OkxChainIntelStream } from './okx-chain-intel.js';
+import {
+  DEFAULT_TRADING_CONFIG, emptyTradingState, managedExitDecision,
+  normalizeTradingConfig, normalizeTradingState, rankEntryCandidates, tradingDayKey
+} from './trading-engine.js';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const publicDir = join(root, 'public');
@@ -13,6 +17,7 @@ const dataDir = join(root, 'data');
 const legacyStateFile = join(dataDir, 'monitor-state.json');
 const stateFile = join(dataDir, 'monitor-state.json.gz');
 const paperPortfolioFile = join(dataDir, 'paper-portfolio.json');
+const autoTradingFile = join(dataDir, 'auto-trading.json');
 const databaseFile = join(dataDir, 'alphapulse.db');
 const envFile = join(root, '.env');
 const port = Number(process.env.PORT || 4173);
@@ -68,6 +73,10 @@ let okxIntelStatus = { configured:false, status:'not_configured', lastEvent:0, a
 const PAPER_CAPITAL = 100_000;
 let paperPortfolio = emptyPaperPortfolio();
 let paperPortfolioPersisted = false;
+let tradingConfig = normalizeTradingConfig(DEFAULT_TRADING_CONFIG);
+let tradingState = emptyTradingState();
+let tradingPersisted = false;
+let tradingBusy = false;
 
 function emptyPaperPortfolio() {
   return { version:1, updatedAt:Date.now(), cash:PAPER_CAPITAL, positions:{}, realized:0, trades:[] };
@@ -113,6 +122,195 @@ async function persistPaperPortfolio() {
   await writeFile(tempFile, JSON.stringify(paperPortfolio), 'utf8');
   await rename(tempFile, paperPortfolioFile);
   paperPortfolioPersisted = true;
+}
+
+async function loadAutoTrading() {
+  try {
+    const saved = JSON.parse(await readFile(autoTradingFile, 'utf8'));
+    tradingConfig = normalizeTradingConfig(saved.config);
+    tradingState = normalizeTradingState(saved.state);
+    tradingPersisted = true;
+    console.log(`Restored auto trading (${tradingConfig.enabled ? 'enabled' : 'paused'}) with ${Object.keys(tradingState.managedPositions).length} managed positions`);
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.error(`Auto trading restore failed: ${error.message}`);
+    tradingConfig = normalizeTradingConfig(DEFAULT_TRADING_CONFIG);
+    tradingState = emptyTradingState();
+    tradingPersisted = false;
+  }
+}
+
+async function persistAutoTrading() {
+  await mkdir(dataDir, { recursive:true });
+  const tempFile = `${autoTradingFile}.tmp`;
+  tradingState.updatedAt = Date.now();
+  await writeFile(tempFile, JSON.stringify({ version:1, config:tradingConfig, state:tradingState }), 'utf8');
+  await rename(tempFile, autoTradingFile);
+  tradingPersisted = true;
+}
+
+function resetTradingDay(now = Date.now()) {
+  const key = tradingDayKey(now);
+  if (tradingState.daily?.key === key) return;
+  tradingState.daily = { key, entries:0, realizedPnl:0 };
+  tradingState.pausedReason = null;
+}
+
+function recordTradingEvent(event) {
+  const item = { id:`trade-${Date.now()}-${Math.random().toString(36).slice(2,8)}`, createdAt:Date.now(), ...event };
+  tradingState.events.unshift(item);
+  tradingState.events = tradingState.events.slice(0,200);
+  broadcastEvent('auto-trade', item);
+  return item;
+}
+
+function applyPaperSale(token, position, quantity, reason) {
+  const qty = Math.min(Number(position.qty) || 0, Number(quantity) || 0);
+  if (!(qty > 0) || !(token.price > 0)) return null;
+  const proceeds = qty * token.price;
+  const realizedPnl = (token.price - position.avgCost) * qty;
+  paperPortfolio.cash += proceeds;
+  paperPortfolio.realized += realizedPnl;
+  position.qty -= qty;
+  position.lastPrice = token.price;
+  if (position.qty < 1e-10) delete paperPortfolio.positions[token.address];
+  paperPortfolio.trades.unshift({
+    side:'sell', symbol:token.symbol, address:token.address, amount:proceeds, quantity:qty,
+    price:token.price, time:Date.now(), execution:'auto-paper', reason
+  });
+  paperPortfolio.trades = paperPortfolio.trades.slice(0,100);
+  paperPortfolio.updatedAt = Date.now();
+  tradingState.daily.realizedPnl += realizedPnl;
+  return { qty, proceeds, realizedPnl };
+}
+
+function tradingPauseReason() {
+  if (!tradingConfig.enabled) return '策略已暂停';
+  if (tradingConfig.executionMode !== 'paper') return '真实执行必须逐笔确认';
+  if (tradingState.daily.realizedPnl <= -tradingConfig.maxDailyLossUsd) return '已达到单日最大亏损';
+  if (tradingState.daily.entries >= tradingConfig.maxDailyEntries) return '已达到单日开仓上限';
+  return null;
+}
+
+function tradingCandidates(tokens) {
+  return rankEntryCandidates(tokens, tradingConfig, paperPortfolio.positions, tradingState.managedPositions)
+    .slice(0,10)
+    .map(({ token, evaluation }) => ({
+      symbol:token.symbol, name:token.name, address:token.address, alphaId:token.alphaId,
+      score:token.score, quality:token.quality, stage:token.stage, price:token.price,
+      change24h:token.change24h, liquidity:token.liquidity, holders:token.holders,
+      poolImpactPct:evaluation.poolImpactPct, priceSource:token.priceSource
+    }));
+}
+
+function tradingOverview() {
+  const tokenMap = new Map(cache.tokens.map((token) => [token.address, token]));
+  const managedPositions = Object.entries(tradingState.managedPositions).map(([address, managed]) => {
+    const token = tokenMap.get(address);
+    const position = paperPortfolio.positions[address];
+    const price = Number(token?.price || position?.lastPrice || managed.entryPrice) || managed.entryPrice;
+    const value = (Number(position?.qty) || 0) * price;
+    const pnl = position ? (price - position.avgCost) * position.qty : 0;
+    return {
+      ...managed, quantity:Number(position?.qty) || 0, currentPrice:price, value, pnl,
+      pnlPct:position?.avgCost > 0 ? ((price / position.avgCost) - 1) * 100 : 0,
+      principalTargetPrice:managed.entryPrice * tradingConfig.takePrincipalMultiple
+    };
+  }).sort((a,b) => b.openedAt - a.openedAt);
+  return {
+    persisted:tradingPersisted,
+    safety:{ liveExecution:false, confirmationRequired:true, walletCredentialsStored:false },
+    config:tradingConfig,
+    state:{
+      ...tradingState,
+      managedPositions,
+      managedPositionCount:managedPositions.length,
+      candidates:tradingCandidates(cache.tokens)
+    },
+    now:Date.now()
+  };
+}
+
+async function evaluateAutoTrading(tokens, now = Date.now()) {
+  if (tradingBusy) return;
+  tradingBusy = true;
+  try {
+    resetTradingDay(now);
+    tradingState.lastEvaluationAt = now;
+    let changed = false;
+
+    for (const [address, managed] of Object.entries(tradingState.managedPositions)) {
+      const position = paperPortfolio.positions[address];
+      const token = tokens.find((item) => item.address === address);
+      if (!position) {
+        recordTradingEvent({ type:'position-closed', symbol:managed.symbol, address, message:'持仓已在其他位置关闭，自动管理结束' });
+        delete tradingState.managedPositions[address];
+        changed = true;
+        continue;
+      }
+      if (!token?.price) continue;
+      managed.highWaterPrice = Math.max(Number(managed.highWaterPrice) || 0, token.price);
+      const decision = managedExitDecision(token, position, managed, tradingConfig);
+      if (!tradingConfig.enabled || !decision) continue;
+      const result = applyPaperSale(token, position, decision.qty, decision.reason);
+      if (!result) continue;
+      managed.lastActionAt = now;
+      if (decision.reason === 'principal-recovery') {
+        managed.principalRecovered = true;
+        managed.principalRecoveredUsd += result.proceeds;
+      }
+      if (!paperPortfolio.positions[address]) delete tradingState.managedPositions[address];
+      recordTradingEvent({
+        type:'sell', reason:decision.reason, symbol:token.symbol, address, price:token.price,
+        quantity:result.qty, amountUsd:result.proceeds, realizedPnl:result.realizedPnl,
+        message:decision.reason === 'principal-recovery' ? '价格达到目标，已自动卖出并收回本金' : decision.reason === 'stop-loss' ? '触发硬止损，已自动退出模拟仓' : '触发结构性风险，已自动退出模拟仓'
+      });
+      changed = true;
+    }
+
+    const pauseReason = tradingPauseReason();
+    tradingState.pausedReason = pauseReason;
+    const cooldownReady = now - tradingState.lastEntryAt >= tradingConfig.cooldownMinutes * 60_000;
+    const slots = tradingConfig.maxPositions - Object.keys(tradingState.managedPositions).length;
+    if (!pauseReason && cooldownReady && slots > 0 && paperPortfolio.cash >= tradingConfig.orderUsd) {
+      const candidate = rankEntryCandidates(tokens, tradingConfig, paperPortfolio.positions, tradingState.managedPositions)[0];
+      if (candidate?.token?.price > 0) {
+        const token = candidate.token;
+        const amount = Math.min(tradingConfig.orderUsd, paperPortfolio.cash);
+        const qty = amount / token.price;
+        paperPortfolio.positions[token.address] = { symbol:token.symbol, name:token.name, qty, avgCost:token.price, lastPrice:token.price };
+        paperPortfolio.cash -= amount;
+        paperPortfolio.updatedAt = now;
+        paperPortfolio.trades.unshift({
+          side:'buy', symbol:token.symbol, address:token.address, amount, quantity:qty,
+          price:token.price, time:now, execution:'auto-paper', reason:'signal-entry'
+        });
+        paperPortfolio.trades = paperPortfolio.trades.slice(0,100);
+        tradingState.managedPositions[token.address] = {
+          address:token.address, symbol:token.symbol, entryPrice:token.price, initialCostUsd:amount,
+          openedAt:now, principalRecovered:false, principalRecoveredUsd:0,
+          highWaterPrice:token.price, lastActionAt:now
+        };
+        tradingState.daily.entries += 1;
+        tradingState.lastEntryAt = now;
+        recordTradingEvent({
+          type:'buy', reason:'signal-entry', symbol:token.symbol, address:token.address,
+          price:token.price, quantity:qty, amountUsd:amount, score:token.score,
+          message:`满足保守试仓规则，已自动模拟买入 ${amount.toFixed(2)} USDT`
+        });
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      await persistPaperPortfolio();
+      await persistAutoTrading();
+    }
+  } catch (error) {
+    tradingState.pausedReason = `自动交易异常：${error.message}`;
+    console.error(tradingState.pausedReason);
+  } finally {
+    tradingBusy = false;
+  }
 }
 
 async function readJsonBody(req, maxBytes=1_000_000) {
@@ -1075,6 +1273,7 @@ async function refreshTokens(force = false) {
     syncOkxPriorityTokens(tokens);
     recordPerformanceData(tokens, now);
     cache = { fetchedAt: now, tokens, source: 'Binance Alpha', error: null };
+    await evaluateAutoTrading(tokens, now);
     schedulePersist();
   } catch (error) {
     cache = { ...cache, error: error.message, source: cache.tokens.length ? 'cached' : 'unavailable' };
@@ -1131,12 +1330,37 @@ async function api(req, res, url) {
     await persistPaperPortfolio();
     return json(res, { persisted:true, portfolio:paperPortfolio });
   }
+  if (url.pathname === '/api/trading') {
+    if (req.method !== 'GET') {
+      res.setHeader('allow', 'GET');
+      return json(res, { error:'Method not allowed' }, 405);
+    }
+    return json(res, tradingOverview());
+  }
+  if (url.pathname === '/api/trading/config') {
+    if (req.method !== 'PUT') {
+      res.setHeader('allow', 'PUT');
+      return json(res, { error:'Method not allowed' }, 405);
+    }
+    const payload = await readJsonBody(req, 100_000);
+    tradingConfig = normalizeTradingConfig({ ...tradingConfig, ...payload });
+    tradingState.pausedReason = tradingConfig.enabled ? null : '策略已暂停';
+    await persistAutoTrading();
+    if (tradingConfig.enabled) await evaluateAutoTrading(cache.tokens, Date.now());
+    return json(res, tradingOverview());
+  }
   if (url.pathname === '/api/health') {
     return json(res, {
-      ok: true, version: '0.7.0', mode: 'unattended', pollingMs: CACHE_MS,
+      ok: true, version: '0.8.0', mode: 'unattended', pollingMs: CACHE_MS,
       now: Date.now(), lastRefresh: cache.fetchedAt, cachedTokens: cache.tokens.length,
       histories: histories.size, alerts:alerts.length, performanceDatabase:Boolean(performanceDb), source: cache.source, error: cache.error,
       chainIntel: { ...okxIntelStatus, eventTokens:chainEventLog.size, liquidityTokens:chainLiquidityHistory.size, holderTokens:chainHolderState.size },
+      trading: {
+        enabled:tradingConfig.enabled, executionMode:tradingConfig.executionMode,
+        managedPositions:Object.keys(tradingState.managedPositions).length,
+        dailyEntries:tradingState.daily.entries, pausedReason:tradingState.pausedReason,
+        liveExecution:false, confirmationRequired:true
+      },
       realtime: {
         status: alphaSocketStatus,
         lastEvent: alphaSocketLastEvent,
@@ -1215,6 +1439,7 @@ server.listen(port, '127.0.0.1', () => {
   loadEnvironmentFile()
     .then(() => loadPersistentState())
     .then(() => loadPaperPortfolio())
+    .then(() => loadAutoTrading())
     .then(() => initializePerformanceDatabase())
     .then(() => startOkxChainIntel())
     .then(() => monitorTick())
@@ -1234,6 +1459,8 @@ async function shutdown(signal) {
     try { client.end(); } catch {}
   }
   await persistState();
+  try { await persistPaperPortfolio(); } catch {}
+  try { await persistAutoTrading(); } catch {}
   try { performanceDb?.exec('PRAGMA wal_checkpoint(TRUNCATE);'); } catch {}
   try { performanceDb?.close(); } catch {}
   server.close(() => process.exit(0));

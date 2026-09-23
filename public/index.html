@@ -12,6 +12,7 @@
   <link rel="stylesheet" href="/legibility.css" />
   <link rel="stylesheet" href="/polish.css" />
   <link rel="stylesheet" href="/readability.css" />
+  <link rel="stylesheet" href="/trading.css" />
 </head>
 <body>
   <div class="noise"></div>
@@ -21,6 +22,10 @@
       <div><strong>ALPHA<span>PULSE</span></strong><small>阿尔法脉冲 · 链上异动监控</small></div>
     </div>
     <div class="top-actions">
+      <button class="trading-button" id="tradingButton" aria-label="打开自动交易中心">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16l5-5 4 4 7-8M15 7h5v5"/></svg>
+        <span>自动交易</span><b id="tradingStatusBadge">OFF</b>
+      </button>
       <button class="compact-toggle" id="compactToggle" aria-pressed="false" title="切换紧凑监控模式">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M5 12h14M5 17h14"/></svg><span>紧凑模式</span>
       </button>
@@ -41,11 +46,11 @@
       <div>
         <p class="eyebrow">BINANCE ALPHA · BSC / CHAIN 56</p>
         <h1>在价格爆发之前，<br><em>先看见资金的动作。</em></h1>
-        <p class="hero-copy">监控 Binance Alpha 资产的量价、流动性、换手与持仓结构，并用实时价格验证模拟策略。不连接钱包，不自动交易。</p>
+        <p class="hero-copy">监控 Binance Alpha 资产的量价、流动性、换手与持仓结构，用实时价格验证策略，并通过带硬风控的模拟自动交易持续复盘。</p>
         <div class="hero-meta">
           <span><i></i> WebSocket 实时行情</span>
           <span>BSC · Chain 56</span>
-          <span>Paper Trading</span>
+          <span>Guarded Auto Trading</span>
         </div>
       </div>
       <div class="radar-panel" aria-hidden="true">
@@ -213,9 +218,58 @@
     <div class="performance-note"><i></i><span>胜率和收益仅反映已记录的历史样本，不保证未来表现，也不会触发真实交易。</span></div>
   </aside>
 
+  <div class="trading-backdrop" id="tradingBackdrop"></div>
+  <aside class="trading-center" id="tradingCenter" aria-hidden="true">
+    <div class="trading-center-head">
+      <div><p class="eyebrow">GUARDED EXECUTION</p><h2>自动交易中心</h2><span>自动模拟成交 · 真实交易逐笔确认</span></div>
+      <button class="trading-close" id="tradingClose" aria-label="关闭自动交易中心">×</button>
+    </div>
+    <section class="trading-mode-card">
+      <div><span>执行模式</span><strong>模拟自动交易</strong><small id="tradingEngineStatus">正在读取策略状态</small></div>
+      <button id="tradingToggle" class="trading-toggle" type="button"><i></i><span>启动策略</span></button>
+    </section>
+    <div class="live-trading-lock"><i>!</i><div><b>真实资金保持锁定</b><p>项目不保存私钥或钱包凭据。满足规则后只提供候选；真实买入、卖出和翻倍出本订单必须在钱包中逐笔确认。</p></div></div>
+    <section class="trading-config">
+      <div class="trading-section-title"><div><span>仓位与风险参数</span><small>保存后立即用于下一次 5 秒评估</small></div><em>PAPER ONLY</em></div>
+      <div class="trading-grid">
+        <label><span>单笔试仓</span><input id="tradeConfigOrderUsd" type="number" min="10" step="100"><small>USDT</small></label>
+        <label><span>最多持仓</span><input id="tradeConfigMaxPositions" type="number" min="1" max="20"><small>个</small></label>
+        <label><span>最低评分</span><input id="tradeConfigMinScore" type="number" min="0" max="100"><small>分</small></label>
+        <label><span>最低流动性</span><input id="tradeConfigMinLiquidity" type="number" min="0" step="10000"><small>美元</small></label>
+        <label><span>硬止损</span><input id="tradeConfigStopLoss" type="number" min="1" max="95" step="1"><small>%</small></label>
+        <label><span>出本倍数</span><input id="tradeConfigPrincipalMultiple" type="number" min="1.1" max="20" step="0.1"><small>×</small></label>
+        <label><span>单日最大亏损</span><input id="tradeConfigDailyLoss" type="number" min="10" step="100"><small>USDT</small></label>
+        <label><span>单日最多开仓</span><input id="tradeConfigDailyEntries" type="number" min="1" max="100"><small>次</small></label>
+      </div>
+      <div class="trading-checks">
+        <label><input id="tradeConfigHighQuality" type="checkbox">只交易高质量信号</label>
+        <label><input id="tradeConfigOnchain" type="checkbox">必须有链上净买入确认</label>
+        <label><input id="tradeConfigRiskExit" type="checkbox">结构性风险自动退出</label>
+      </div>
+      <button id="saveTradingConfig" class="save-trading-config" type="button">保存风控参数</button>
+    </section>
+    <section class="trading-summary" id="tradingSummary">
+      <article><span>今日开仓</span><strong id="tradingDailyEntries">—</strong><small id="tradingEntryLimit">—</small></article>
+      <article><span>今日已实现</span><strong id="tradingDailyPnl">—</strong><small>自动仓</small></article>
+      <article><span>自动持仓</span><strong id="tradingManagedCount">—</strong><small id="tradingPositionLimit">—</small></article>
+    </section>
+    <section class="trading-list-section">
+      <div class="trading-section-title"><div><span>自动管理持仓</span><small>翻倍时按实际成本精确收回本金</small></div></div>
+      <div id="tradingPositions" class="trading-position-list"><div class="trading-empty">暂无自动管理持仓</div></div>
+    </section>
+    <section class="trading-list-section">
+      <div class="trading-section-title"><div><span>当前候选</span><small>仅显示通过全部硬风控的试仓信号</small></div></div>
+      <div id="tradingCandidates" class="trading-candidate-list"><div class="trading-empty">正在评估候选</div></div>
+    </section>
+    <section class="trading-list-section">
+      <div class="trading-section-title"><div><span>执行记录</span><small>自动保存到云服务器</small></div></div>
+      <div id="tradingEvents" class="trading-event-list"><div class="trading-empty">尚无自动交易记录</div></div>
+    </section>
+  </aside>
+
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <footer><span>ALPHAPULSE / PAPER MODE</span><span>价格：Binance Alpha WebSocket 实时推送 · 5 秒指标校准</span><span>模拟交易 · 不构成投资建议</span></footer>
+  <footer><span>ALPHAPULSE / GUARDED PAPER MODE</span><span>价格：Binance Alpha WebSocket 实时推送 · 5 秒指标校准</span><span>真实交易需逐笔确认 · 不构成投资建议</span></footer>
   <script type="module" src="/app.js"></script>
 </body>
 </html>

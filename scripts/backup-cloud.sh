@@ -19,7 +19,7 @@ if [[ -s "$ALPHAPULSE_NVM_DIR/nvm.sh" ]]; then
   nvm use --delete-prefix 22 >/dev/null
 fi
 
-for file in monitor-state.json.gz monitor-state.json paper-portfolio.json; do
+for file in monitor-state.json.gz monitor-state.json paper-portfolio.json auto-trading.json; do
   if [[ -f "$DATA_DIR/$file" ]]; then cp -p "$DATA_DIR/$file" "$DEST_DIR/$file"; fi
 done
 

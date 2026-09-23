@@ -51,7 +51,8 @@ const state = {
   chainIntelStatus:{ configured:false, status:'not_configured', lastEvent:0, trackedTokens:0 },
   alerts:[], alertsLoaded:false, alertFilter:'all', lastAlertSeen:Number(localStorage.getItem(ALERT_SEEN_KEY)) || 0,
   mutedTokens:loadStringSet(ALERT_MUTED_TOKENS_KEY), mutedRules:loadStringSet(ALERT_MUTED_RULES_KEY),
-  compact:localStorage.getItem(COMPACT_KEY) === '1', performance:null, performanceHorizon:'15m'
+  compact:localStorage.getItem(COMPACT_KEY) === '1', performance:null, performanceHorizon:'15m',
+  trading:null, tradingLoading:false
 };
 const $ = (id) => document.getElementById(id);
 const fmt = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 });
@@ -164,6 +165,14 @@ function connectRealtime() {
   stream.addEventListener('chain-status',(event)=>{
     try { state.chainIntelStatus = JSON.parse(event.data); }
     catch {}
+  });
+  stream.addEventListener('auto-trade',(event)=>{
+    try {
+      const item = JSON.parse(event.data);
+      showToast(item.message || '自动交易状态已更新');
+      loadPaperFromServer();
+      loadTrading();
+    } catch {}
   });
   stream.onmessage = (event) => {
     try {
@@ -496,6 +505,138 @@ function renderPortfolio() {
       <small>${fmt.format(position.qty)} 枚 · 均价 ${money(position.avgCost)} · 现价 ${money(price)}</small><em class="${pnl>=0?'positive':'negative'}">${signedMoney(pnl)} · ${pct(pnlPct)}</em>
     </button>`).join('') : '<div class="paper-empty">点击榜单资产，在详情中模拟买入</div>';
   document.querySelectorAll('.paper-position[data-address]').forEach((el)=>el.addEventListener('click',()=>openDrawer(el.dataset.address)));
+}
+
+function openTradingCenter() {
+  document.body.classList.add('trading-open');
+  $('tradingBackdrop').classList.add('open');
+  $('tradingCenter').classList.add('open');
+  $('tradingCenter').setAttribute('aria-hidden','false');
+  loadTrading();
+}
+
+function closeTradingCenter() {
+  document.body.classList.remove('trading-open');
+  $('tradingBackdrop').classList.remove('open');
+  $('tradingCenter').classList.remove('open');
+  $('tradingCenter').setAttribute('aria-hidden','true');
+}
+
+function tradingReasonLabel(reason) {
+  return ({
+    'signal-entry':'信号试仓', 'principal-recovery':'翻倍出本',
+    'stop-loss':'硬止损', 'hard-risk':'结构风险退出'
+  })[reason] || reason || '状态更新';
+}
+
+function syncTradingInputs(config) {
+  if (!config || document.activeElement?.closest?.('.trading-config')) return;
+  $('tradeConfigOrderUsd').value = config.orderUsd;
+  $('tradeConfigMaxPositions').value = config.maxPositions;
+  $('tradeConfigMinScore').value = config.minScore;
+  $('tradeConfigMinLiquidity').value = config.minLiquidityUsd;
+  $('tradeConfigStopLoss').value = config.stopLossPct;
+  $('tradeConfigPrincipalMultiple').value = config.takePrincipalMultiple;
+  $('tradeConfigDailyLoss').value = config.maxDailyLossUsd;
+  $('tradeConfigDailyEntries').value = config.maxDailyEntries;
+  $('tradeConfigHighQuality').checked = config.requireHighQuality;
+  $('tradeConfigOnchain').checked = config.requireOnchainConfirmation;
+  $('tradeConfigRiskExit').checked = config.exitOnHardRisk;
+}
+
+function renderTrading() {
+  const payload = state.trading;
+  if (!payload) return;
+  const { config, state:engine } = payload;
+  const running = Boolean(config.enabled);
+  $('tradingButton').classList.toggle('running', running);
+  $('tradingStatusBadge').textContent = running ? 'PAPER' : 'OFF';
+  $('tradingToggle').classList.toggle('active', running);
+  $('tradingToggle').querySelector('span').textContent = running ? '暂停策略' : '启动策略';
+  $('tradingEngineStatus').textContent = running
+    ? engine.pausedReason || `运行中 · 每 5 秒评估 · 单笔 ${money(config.orderUsd)}`
+    : '已暂停，不会产生新的自动模拟成交';
+  $('tradingDailyEntries').textContent = engine.daily.entries;
+  $('tradingEntryLimit').textContent = `上限 ${config.maxDailyEntries} 次`;
+  $('tradingDailyPnl').textContent = signedMoney(engine.daily.realizedPnl || 0);
+  $('tradingDailyPnl').className = (engine.daily.realizedPnl || 0) >= 0 ? 'positive' : 'negative';
+  $('tradingManagedCount').textContent = engine.managedPositionCount;
+  $('tradingPositionLimit').textContent = `上限 ${config.maxPositions} 个`;
+  syncTradingInputs(config);
+
+  $('tradingPositions').innerHTML = engine.managedPositions.length ? engine.managedPositions.map((item)=>`
+    <button class="trading-position" data-address="${escapeHtml(item.address)}">
+      <div><b>${escapeHtml(item.symbol)}</b><em class="${item.pnl>=0?'positive':'negative'}">${pct(item.pnlPct)}</em></div>
+      <span>现值 ${money(item.value)} · ${item.principalRecovered ? '本金已收回' : `出本价 ${money(item.principalTargetPrice)}`}</span>
+      <small>均价 ${money(item.entryPrice)} · 现价 ${money(item.currentPrice)} · ${fmt.format(item.quantity)} 枚</small>
+    </button>`).join('') : '<div class="trading-empty">暂无自动管理持仓</div>';
+
+  $('tradingCandidates').innerHTML = engine.candidates.length ? engine.candidates.map((item)=>`
+    <button class="trading-candidate" data-address="${escapeHtml(item.address)}">
+      <div><b>${escapeHtml(item.symbol)}</b><em>${item.score} 分</em></div>
+      <span>${escapeHtml(item.quality)} · ${escapeHtml(item.stage)} · 24H ${pct(item.change24h)}</span>
+      <small>流动性 ${money(item.liquidity)} · 试仓占池 ${item.poolImpactPct.toFixed(3)}% · ${escapeHtml(item.priceSource || 'Binance Alpha')}</small>
+    </button>`).join('') : '<div class="trading-empty">当前没有通过全部硬风控的候选</div>';
+
+  $('tradingEvents').innerHTML = engine.events.length ? engine.events.slice(0,20).map((item)=>`
+    <article class="trading-event ${escapeHtml(item.type || '')}">
+      <div><b>${escapeHtml(item.symbol || 'SYSTEM')} · ${escapeHtml(tradingReasonLabel(item.reason))}</b><span>${relativeTime(item.createdAt)}</span></div>
+      <span>${escapeHtml(item.message || '')}</span>
+      <small>${item.amountUsd ? `${money(item.amountUsd)} · ` : ''}${item.price ? `价格 ${money(item.price)} · ` : ''}${new Date(item.createdAt).toLocaleString('zh-CN',{hour12:false})}</small>
+    </article>`).join('') : '<div class="trading-empty">尚无自动交易记录</div>';
+
+  document.querySelectorAll('#tradingPositions [data-address],#tradingCandidates [data-address]').forEach((item)=>item.addEventListener('click',()=>{
+    closeTradingCenter();
+    openDrawer(item.dataset.address);
+  }));
+}
+
+async function loadTrading() {
+  if (state.tradingLoading) return;
+  state.tradingLoading = true;
+  try {
+    const response = await fetch('/api/trading');
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '自动交易状态读取失败');
+    state.trading = data;
+    renderTrading();
+  } catch (error) {
+    $('tradingStatusBadge').textContent = 'ERR';
+    if ($('tradingEngineStatus')) $('tradingEngineStatus').textContent = error.message;
+  } finally { state.tradingLoading = false; }
+}
+
+async function updateTradingConfig(changes) {
+  try {
+    const response = await fetch('/api/trading/config', {
+      method:'PUT', headers:{'content-type':'application/json'}, body:JSON.stringify(changes)
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '风控参数保存失败');
+    state.trading = data;
+    renderTrading();
+    await loadPaperFromServer();
+    return true;
+  } catch (error) {
+    showToast(error.message, true);
+    return false;
+  }
+}
+
+function readTradingInputs() {
+  return {
+    orderUsd:Number($('tradeConfigOrderUsd').value),
+    maxPositions:Number($('tradeConfigMaxPositions').value),
+    minScore:Number($('tradeConfigMinScore').value),
+    minLiquidityUsd:Number($('tradeConfigMinLiquidity').value),
+    stopLossPct:Number($('tradeConfigStopLoss').value),
+    takePrincipalMultiple:Number($('tradeConfigPrincipalMultiple').value),
+    maxDailyLossUsd:Number($('tradeConfigDailyLoss').value),
+    maxDailyEntries:Number($('tradeConfigDailyEntries').value),
+    requireHighQuality:$('tradeConfigHighQuality').checked,
+    requireOnchainConfirmation:$('tradeConfigOnchain').checked,
+    exitOnHardRisk:$('tradeConfigRiskExit').checked
+  };
 }
 
 function scoreColor(score) {
@@ -1002,6 +1143,16 @@ $('alertsButton').addEventListener('click',openAlertCenter);
 $('alertClose').addEventListener('click',closeAlertCenter); $('alertBackdrop').addEventListener('click',closeAlertCenter);
 $('performanceButton').addEventListener('click',openPerformanceCenter);
 $('performanceClose').addEventListener('click',closePerformanceCenter); $('performanceBackdrop').addEventListener('click',closePerformanceCenter);
+$('tradingButton').addEventListener('click',openTradingCenter);
+$('tradingClose').addEventListener('click',closeTradingCenter); $('tradingBackdrop').addEventListener('click',closeTradingCenter);
+$('tradingToggle').addEventListener('click',async()=>{
+  const enabling = !state.trading?.config?.enabled;
+  if (enabling && !confirm('启动后会按当前规则自动操作模拟仓：单笔试仓、硬止损、翻倍出本。不会执行真实交易。确定启动吗？')) return;
+  if (await updateTradingConfig({ enabled:enabling })) showToast(enabling ? '模拟自动交易已启动' : '自动交易策略已暂停');
+});
+$('saveTradingConfig').addEventListener('click',async()=>{
+  if (await updateTradingConfig(readTradingInputs())) showToast('自动交易风控参数已保存');
+});
 $('performanceTabs').addEventListener('click',(event)=>{
   if (!event.target.dataset.horizon) return;
   state.performanceHorizon = event.target.dataset.horizon;
@@ -1032,7 +1183,7 @@ $('notificationToggle').addEventListener('click',async()=>{
     localStorage.setItem(ALERT_NOTIFY_KEY,'1'); renderNotificationState(); showToast('桌面通知已开启');
   } else { renderNotificationState(); showToast('需要在浏览器中允许通知权限',true); }
 });
-document.addEventListener('keydown',(e)=>{if(e.key==='Escape'){closeDrawer();closeAlertCenter();closePerformanceCenter();}});
+document.addEventListener('keydown',(e)=>{if(e.key==='Escape'){closeDrawer();closeAlertCenter();closePerformanceCenter();closeTradingCenter();}});
 setInterval(()=>{$('clock').textContent=new Date().toLocaleTimeString('zh-CN',{hour12:false});},1000);
 setInterval(()=>loadTokens(false),5_000);
 syncRuleInputs(); updateRuleSummary();
@@ -1043,6 +1194,8 @@ connectRealtime();
 loadAlerts();
 loadPaperFromServer();
 loadPerformance();
+loadTrading();
 loadTokens(true);
 setInterval(loadAlerts,15_000);
 setInterval(loadPerformance,30_000);
+setInterval(loadTrading,15_000);
