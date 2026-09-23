@@ -8,7 +8,8 @@ import { promisify } from 'node:util';
 import { OkxChainIntelStream } from './okx-chain-intel.js';
 import {
   DEFAULT_TRADING_CONFIG, emptyTradingState, managedExitDecision,
-  normalizeTradingConfig, normalizeTradingState, rankEntryCandidates, tradingDayKey
+  normalizeTradingConfig, normalizeTradingState, rankEntryCandidates,
+  reconcileManagedAddition, tradingDayKey
 } from './trading-engine.js';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
@@ -161,6 +162,24 @@ function recordTradingEvent(event) {
   tradingState.events = tradingState.events.slice(0,200);
   broadcastEvent('auto-trade', item);
   return item;
+}
+
+function reconcileManagedPortfolioAdditions(previousPortfolio, nextPortfolio, now = Date.now()) {
+  const additions = [];
+  for (const [address, managed] of Object.entries(tradingState.managedPositions)) {
+    const result = reconcileManagedAddition(
+      previousPortfolio.positions?.[address], nextPortfolio.positions?.[address], managed, now
+    );
+    if (!result) continue;
+    tradingState.managedPositions[address] = result.updated;
+    additions.push({
+      type:'buy', reason:'manual-add', symbol:managed.symbol, address,
+      price:nextPortfolio.positions[address].avgCost, quantity:result.quantityAdded,
+      amountUsd:result.addedCostUsd,
+      message:`检测到手动加仓，均价已更新为 ${nextPortfolio.positions[address].avgCost}`
+    });
+  }
+  return additions;
 }
 
 function applyPaperSale(token, position, quantity, reason) {
@@ -1326,8 +1345,15 @@ async function api(req, res, url) {
       return json(res, { error:'Method not allowed' }, 405);
     }
     const payload = await readJsonBody(req);
-    paperPortfolio = normalizePaperPortfolio({ ...payload, updatedAt:Date.now() });
+    const now = Date.now();
+    const nextPortfolio = normalizePaperPortfolio({ ...payload, updatedAt:now });
+    const additions = reconcileManagedPortfolioAdditions(paperPortfolio, nextPortfolio, now);
+    paperPortfolio = nextPortfolio;
     await persistPaperPortfolio();
+    if (additions.length) {
+      for (const event of additions) recordTradingEvent(event);
+      await persistAutoTrading();
+    }
     return json(res, { persisted:true, portfolio:paperPortfolio });
   }
   if (url.pathname === '/api/trading') {

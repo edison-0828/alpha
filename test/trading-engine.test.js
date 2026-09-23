@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_TRADING_CONFIG, entryEvaluation, managedExitDecision,
-  normalizeTradingConfig, principalRecoveryOrder, rankEntryCandidates
+  normalizeTradingConfig, principalRecoveryOrder, rankEntryCandidates,
+  reconcileManagedAddition
 } from '../trading-engine.js';
 
 function token(overrides = {}) {
@@ -64,4 +65,28 @@ test('hard risk exits before take-principal and stop loss exits below threshold'
   assert.equal(managedExitDecision(risky, position, managed, DEFAULT_TRADING_CONFIG).reason, 'hard-risk');
   const stopped = token({ price:0.87 });
   assert.equal(managedExitDecision(stopped, position, managed, DEFAULT_TRADING_CONFIG).reason, 'stop-loss');
+});
+
+test('updates weighted average and only adds new capital to unrecovered principal', () => {
+  const previous = { qty:100, avgCost:1 };
+  const next = { qty:150, avgCost:200 / 150 };
+  const managed = {
+    entryPrice:1, initialCostUsd:100, principalRecovered:true,
+    principalRecoveredUsd:100, highWaterPrice:2, lastActionAt:1
+  };
+  const addition = reconcileManagedAddition(previous, next, managed, 2);
+  assert.equal(addition.quantityAdded, 50);
+  assert.equal(addition.addedCostUsd, 100);
+  assert.equal(addition.updated.entryPrice, 200 / 150);
+  assert.equal(addition.updated.initialCostUsd, 200);
+  assert.equal(addition.updated.principalRecoveredUsd, 100);
+  assert.equal(addition.updated.principalRecovered, false);
+  const recovery = principalRecoveryOrder(next, addition.updated, (200 / 150) * 2, 2);
+  assert.ok(Math.abs(recovery.expectedProceeds - 100) < 1e-9);
+});
+
+test('ignores quantity reductions and unchanged positions when reconciling additions', () => {
+  const managed = { entryPrice:1, initialCostUsd:100, principalRecovered:false, principalRecoveredUsd:0 };
+  assert.equal(reconcileManagedAddition({ qty:100, avgCost:1 }, { qty:90, avgCost:1 }, managed), null);
+  assert.equal(reconcileManagedAddition({ qty:100, avgCost:1 }, { qty:100, avgCost:1 }, managed), null);
 });

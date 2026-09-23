@@ -149,6 +149,32 @@ export function principalRecoveryOrder(position, managed, currentPrice, multiple
   return { reason: 'principal-recovery', qty, expectedProceeds: qty * price, triggerPrice };
 }
 
+export function reconcileManagedAddition(previousPosition, nextPosition, managed, timestamp = Date.now()) {
+  if (!previousPosition || !nextPosition || !managed) return null;
+  const previousQty = finite(previousPosition.qty);
+  const nextQty = finite(nextPosition.qty);
+  const previousCost = previousQty * finite(previousPosition.avgCost);
+  const nextCost = nextQty * finite(nextPosition.avgCost);
+  const quantityAdded = nextQty - previousQty;
+  const addedCostUsd = nextCost - previousCost;
+  if (quantityAdded <= 1e-10 || addedCostUsd <= 0.001) return null;
+  const initialCostUsd = finite(managed.initialCostUsd) + addedCostUsd;
+  const principalRecoveredUsd = Math.max(0, finite(managed.principalRecoveredUsd));
+  return {
+    quantityAdded,
+    addedCostUsd,
+    updated: {
+      ...managed,
+      entryPrice: finite(nextPosition.avgCost, managed.entryPrice),
+      initialCostUsd,
+      principalRecoveredUsd,
+      principalRecovered: principalRecoveredUsd >= initialCostUsd - 0.001,
+      highWaterPrice: Math.max(finite(managed.highWaterPrice), finite(nextPosition.avgCost)),
+      lastActionAt: timestamp
+    }
+  };
+}
+
 export function managedExitDecision(token, position, managed, configValue = DEFAULT_TRADING_CONFIG) {
   if (!token || !position || !managed) return null;
   const config = normalizeTradingConfig(configValue);

@@ -525,7 +525,7 @@ function closeTradingCenter() {
 function tradingReasonLabel(reason) {
   return ({
     'signal-entry':'信号试仓', 'principal-recovery':'翻倍出本',
-    'stop-loss':'硬止损', 'hard-risk':'结构风险退出'
+    'stop-loss':'硬止损', 'hard-risk':'结构风险退出', 'manual-add':'手动加仓'
   })[reason] || reason || '状态更新';
 }
 
