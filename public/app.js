@@ -118,7 +118,7 @@ function scheduleLiveRender() {
         }
       }
     }
-  }, 250);
+  }, 80);
 }
 
 function updateLiveRows() {
@@ -170,6 +170,7 @@ function connectRealtime() {
       const updates = JSON.parse(event.data);
       const byAlphaId = new Map(state.tokens.map((token)=>[String(token.alphaId || '').toUpperCase(),token]));
       let changed = false;
+      let websocketChanged = false;
       for (const update of updates) {
         const token = byAlphaId.get(update.alphaId);
         if (!token || !Number.isFinite(update.price)) continue;
@@ -179,14 +180,17 @@ function connectRealtime() {
         if (update.low24h) token.low24h = update.low24h;
         if (update.volume24h) token.volume24h = update.volume24h;
         token.livePriceAt = update.eventTime;
-        token.priceSource = 'Binance Alpha WS';
+        token.priceSource = update.source || 'Binance Alpha WS';
+        if (token.priceSource === 'Binance Alpha WS') websocketChanged = true;
         changed = true;
       }
       if (!changed) return;
-      state.realtime.connected = true;
-      state.realtime.status = 'live';
-      state.realtime.lastEvent = Date.now();
-      $('updatedAt').textContent = `实时 ${new Date().toLocaleTimeString('zh-CN',{hour12:false})}`;
+      if (websocketChanged) {
+        state.realtime.connected = true;
+        state.realtime.status = 'live';
+        state.realtime.lastEvent = Date.now();
+      }
+      $('updatedAt').textContent = `${websocketChanged ? '实时' : '校准'} ${new Date().toLocaleTimeString('zh-CN',{hour12:false})}`;
       renderSystemStatus();
       scheduleLiveRender();
     } catch {}
@@ -461,26 +465,35 @@ function portfolioSnapshot() {
     const token = state.tokens.find((t)=>t.address===address);
     const price = token?.price || position.lastPrice || position.avgCost;
     const value = position.qty * price;
-    const pnl = value - position.qty * position.avgCost;
-    marketValue += value; cost += position.qty * position.avgCost;
-    return {address, position, token, price, value, pnl};
+    const positionCost = position.qty * position.avgCost;
+    const pnl = value - positionCost;
+    const pnlPct = positionCost > 0 ? (pnl / positionCost) * 100 : 0;
+    marketValue += value; cost += positionCost;
+    return {address, position, token, price, value, pnl, pnlPct};
   }).sort((a,b)=>b.value-a.value);
-  return { positions, marketValue, unrealized:marketValue-cost, equity:state.paper.cash+marketValue, totalPnl:state.paper.cash+marketValue-PAPER_CAPITAL };
+  const unrealized = marketValue - cost;
+  const equity = state.paper.cash + marketValue;
+  const totalPnl = equity - PAPER_CAPITAL;
+  return {
+    positions, marketValue, cost, unrealized, equity, totalPnl,
+    unrealizedPct:cost > 0 ? (unrealized / cost) * 100 : 0,
+    totalPnlPct:(totalPnl / PAPER_CAPITAL) * 100
+  };
 }
 
 function renderPortfolio() {
   const p = portfolioSnapshot();
   $('paperEquity').textContent = money(p.equity);
   $('paperCash').textContent = money(state.paper.cash);
-  $('paperUnrealized').textContent = signedMoney(p.unrealized);
+  $('paperUnrealized').textContent = `${signedMoney(p.unrealized)} · ${pct(p.unrealizedPct)}`;
   $('paperUnrealized').className = p.unrealized >= 0 ? 'positive' : 'negative';
-  $('paperTotalPnl').textContent = `总盈亏 ${signedMoney(p.totalPnl)}`;
+  $('paperTotalPnl').textContent = `总盈亏 ${signedMoney(p.totalPnl)} · ${pct(p.totalPnlPct)}`;
   $('paperTotalPnl').className = p.totalPnl >= 0 ? 'positive' : 'negative';
   $('paperPositionCount').textContent = p.positions.length;
-  $('paperPositions').innerHTML = p.positions.length ? p.positions.map(({address,position,token,value,pnl})=>`
+  $('paperPositions').innerHTML = p.positions.length ? p.positions.map(({address,position,price,value,pnl,pnlPct})=>`
     <button class="paper-position" data-address="${escapeHtml(address)}">
       <strong>${escapeHtml(position.symbol)}</strong><b>${money(value)}</b>
-      <small>${fmt.format(position.qty)} 枚 · 成本 ${money(position.avgCost)}</small><em class="${pnl>=0?'positive':'negative'}">${signedMoney(pnl)}</em>
+      <small>${fmt.format(position.qty)} 枚 · 均价 ${money(position.avgCost)} · 现价 ${money(price)}</small><em class="${pnl>=0?'positive':'negative'}">${signedMoney(pnl)} · ${pct(pnlPct)}</em>
     </button>`).join('') : '<div class="paper-empty">点击榜单资产，在详情中模拟买入</div>';
   document.querySelectorAll('.paper-position[data-address]').forEach((el)=>el.addEventListener('click',()=>openDrawer(el.dataset.address)));
 }

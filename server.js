@@ -16,6 +16,8 @@ const port = Number(process.env.PORT || 4173);
 const BINANCE_ALPHA_URL = 'https://www.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/cex/alpha/all/token/list';
 const BINANCE_ALPHA_WS = 'wss://nbstream.binance.com/w3w/wsa/stream';
 const CACHE_MS = 5_000;
+const LIVE_PRICE_MAX_AGE_MS = 4_000;
+const LIVE_BROADCAST_MS = 80;
 const MAX_HISTORY = 240;
 const MAX_ALERTS = 300;
 const ALERT_COOLDOWN_MS = 30 * 60_000;
@@ -595,7 +597,7 @@ function flushLiveUpdates() {
 
 function queueLiveUpdate(update) {
   pendingLiveUpdates.set(update.alphaId, update);
-  if (!liveBroadcastTimer) liveBroadcastTimer = setTimeout(flushLiveUpdates, 200);
+  if (!liveBroadcastTimer) liveBroadcastTimer = setTimeout(flushLiveUpdates, LIVE_BROADCAST_MS);
 }
 
 function broadcastEvent(name, value) {
@@ -703,13 +705,15 @@ function applyLiveTicker(row) {
   if (!match) return;
   const [, alphaId, quote] = match;
   const price = num(row.c);
-  const eventTime = num(row.E) || Date.now();
+  const receivedAt = Date.now();
+  const eventTime = num(row.E) || receivedAt;
   if (!price) return;
   const existing = livePrices.get(alphaId);
-  if (existing && existing.quote === 'USDT' && quote !== 'USDT') return;
+  const existingFresh = existing && receivedAt - (existing.receivedAt || existing.eventTime) <= LIVE_PRICE_MAX_AGE_MS;
+  if (existingFresh && existing.quote === 'USDT' && quote !== 'USDT') return;
   const open = num(row.o);
   const update = {
-    alphaId, price, eventTime, quote,
+    alphaId, price, eventTime, receivedAt, quote, source:'Binance Alpha WS',
     change24h: open > 0 ? ((price / open) - 1) * 100 : null,
     high24h: num(row.h), low24h: num(row.l), volume24h: num(row.q)
   };
@@ -995,7 +999,17 @@ async function refreshTokens(force = false) {
       const alphaId = String(token.alphaId || '').toUpperCase();
       tokenByAlphaId.set(alphaId, token);
       const live = livePrices.get(alphaId);
-      if (!live) continue;
+      const liveFresh = live && now - (live.receivedAt || live.eventTime) <= LIVE_PRICE_MAX_AGE_MS;
+      if (!liveFresh) {
+        token.priceSource = 'Binance Alpha REST';
+        if (paperPortfolio.positions[token.address]) {
+          queueLiveUpdate({
+            alphaId, price:token.price, eventTime:now, receivedAt:now, source:'Binance Alpha REST',
+            change24h:token.change24h, high24h:token.high24h, low24h:token.low24h, volume24h:token.volume24h
+          });
+        }
+        continue;
+      }
       token.price = live.price;
       if (live.change24h !== null) token.change24h = live.change24h;
       if (live.high24h) token.high24h = live.high24h;
@@ -1066,7 +1080,7 @@ async function api(req, res, url) {
   }
   if (url.pathname === '/api/health') {
     return json(res, {
-      ok: true, version: '0.6.0', mode: 'unattended', pollingMs: CACHE_MS,
+      ok: true, version: '0.6.1', mode: 'unattended', pollingMs: CACHE_MS,
       now: Date.now(), lastRefresh: cache.fetchedAt, cachedTokens: cache.tokens.length,
       histories: histories.size, alerts:alerts.length, performanceDatabase:Boolean(performanceDb), source: cache.source, error: cache.error,
       chainIntel: { ...okxIntelStatus, eventTokens:chainEventLog.size, liquidityTokens:chainLiquidityHistory.size, holderTokens:chainHolderState.size },
@@ -1075,6 +1089,8 @@ async function api(req, res, url) {
         lastEvent: alphaSocketLastEvent,
         ageMs: alphaSocketLastEvent ? Date.now() - alphaSocketLastEvent : null,
         tracked: livePrices.size,
+        freshTracked: [...livePrices.values()].filter((item) => Date.now() - (item.receivedAt || item.eventTime) <= LIVE_PRICE_MAX_AGE_MS).length,
+        maxPriceAgeMs: LIVE_PRICE_MAX_AGE_MS,
         clients: sseClients.size
       }
     });
