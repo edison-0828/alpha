@@ -1,4 +1,5 @@
 const num = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
+const optionalNumber = (value) => value === null || value === undefined || !Number.isFinite(Number(value)) ? null : Number(value);
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
 export const ALERT_COOLDOWN_MS = 30 * 60_000;
@@ -198,20 +199,23 @@ function earlyLaunchActive(token) {
   const metrics = token.metrics || {};
   const chain = token.chainIntel || {};
   const earlyChain = earlyChainConfirmation(chain);
+  const change24h = num(token.change24h);
   if (token.quality === '噪声偏高' || metrics.exhaustion) return false;
   if (token.score < EARLY_LAUNCH_SCORE) return false;
   if (token.stage !== '潜伏' && token.stage !== '启动') return false;
-  if (num(token.change24h) >= 40) return false;
+  if (change24h >= 40 || change24h <= -15) return false;
   if (metrics.change5m !== null && metrics.change5m >= 8) return false;
-  const momentum = metrics.volumeAccelerating === true
-    || (metrics.change1m !== null && metrics.change1m >= 0.35 && metrics.change5m !== null && metrics.change5m >= 0.5);
+  const minuteStart = metrics.change1m !== null && metrics.change1m >= 0.4
+    && (metrics.change5m === null || metrics.change5m >= 0.5);
+  const momentum = metrics.volumeAccelerating === true || minuteStart;
   return momentum || earlyChain.smart || earlyChain.swap;
 }
 
 export function alertRules(token) {
-  const change5m = Number.isFinite(Number(token.metrics?.change5m)) ? Number(token.metrics.change5m) : null;
-  const flow5m = Number.isFinite(Number(token.metrics?.flow5mRatio)) ? Number(token.metrics.flow5mRatio) : null;
-  const change24h = Number.isFinite(Number(token.change24h)) ? Number(token.change24h) : null;
+  const change1m = optionalNumber(token.metrics?.change1m);
+  const change5m = optionalNumber(token.metrics?.change5m);
+  const flow5m = optionalNumber(token.metrics?.flow5mRatio);
+  const change24h = optionalNumber(token.change24h);
   const chain = token.chainIntel || {};
   const tradable = token.quality !== '噪声偏高';
   return [
@@ -244,7 +248,7 @@ export function alertRules(token) {
       type: 'flow-surge', priority: 4,
       active: tradable && token.metrics.volumeAccelerating && flow5m !== null && flow5m >= FLOW_SURGE_RATIO && token.score >= FLOW_SURGE_SCORE,
       level: 'high', label: '资金加速',
-      message: `成交增量加速，5分钟资金强度 ${(flow5m * 100).toFixed(2)}%`
+      message: `成交增量加速，5分钟资金强度 ${flow5m === null ? '—' : `${(flow5m * 100).toFixed(2)}%`}`
     },
     {
       type: 'launch', priority: 3, active: tradable && token.stage === '启动' && token.score >= LAUNCH_SCORE,
@@ -254,7 +258,7 @@ export function alertRules(token) {
     {
       type: 'early-launch', priority: 2.5, active: earlyLaunchActive(token),
       level: 'high', label: '早期启动',
-      message: `阶段 ${token.stage}，评分 ${token.score}，5分钟 ${change5m === null ? '—' : `${change5m.toFixed(2)}%`}`
+      message: `阶段 ${token.stage}，评分 ${token.score}，1分钟 ${change1m === null ? '—' : `${change1m.toFixed(2)}%`}，5分钟 ${change5m === null ? '—' : `${change5m.toFixed(2)}%`}`
     },
     {
       type: 'strong', priority: 2, active: token.score >= 78 && token.quality !== '噪声偏高' && change24h !== null && change24h < 60,

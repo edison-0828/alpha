@@ -138,6 +138,19 @@ test('early-launch fires below the old launch threshold and relaxed rules stay s
   assert.ok(!activeTypes({ ...launching, quality: '噪声偏高' }).includes('flow-surge'));
   assert.ok(!activeTypes({ ...launching, metrics: { ...launching.metrics, flow5mRatio: 0.0011 } }).includes('flow-surge'));
   assert.ok(!activeTypes({ ...launching, change24h: 55 }).includes('early-launch'));
+  assert.ok(!activeTypes({ ...launching, change24h: -21, stage: '潜伏' }).includes('early-launch'));
+  const minuteOnly = {
+    ...launching,
+    score: 48,
+    stage: '潜伏',
+    change24h: 4.6,
+    metrics: { ...launching.metrics, change1m: 0.47, change5m: null, volumeAccelerating: false }
+  };
+  const minuteRule = alertRules(minuteOnly).find((rule) => rule.type === 'early-launch');
+  assert.equal(minuteRule.active, true);
+  assert.match(minuteRule.message, /1分钟 0\.47%/);
+  assert.match(minuteRule.message, /5分钟 —/);
+  assert.ok(!activeTypes({ ...minuteOnly, metrics: { ...minuteOnly.metrics, change1m: 0.2 } }).includes('early-launch'));
 
   const rules = alertRules(launching);
   assert.ok(rules.find((rule) => rule.type === 'launch').priority > rules.find((rule) => rule.type === 'early-launch').priority);
