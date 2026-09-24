@@ -60,6 +60,8 @@ select { font-size: 13px; color: #e4ebe7; }
 .presets button:hover,.presets button.active { border-color: var(--green); color: var(--green); background: #14251a; }
 .presets button.pro-preset { border-color: #3b5260; color: #9bc9e3; }
 .presets button.pro-preset:hover,.presets button.pro-preset.active { border-color: #75b9ff; color: #b9ddff; background: #111e27; }
+.presets button.early-preset { border-color: #6a4b22; color: #f0c27a; }
+.presets button.early-preset:hover,.presets button.early-preset.active { border-color: #f0c27a; color: #ffe3a8; background: #261c10; }
 .rule-grid { display: grid; grid-template-columns: repeat(4,minmax(130px,1fr)); gap: 10px; }
 .rule-grid label { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 7px; border: 1px solid #29352f; background: #0b100d; padding: 9px 10px; }
 .rule-grid label > span { grid-column: 1/-1; color: #aab5af; font-size: 11px; }
