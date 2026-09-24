@@ -12,6 +12,10 @@ import {
   reconcileManagedAddition, tradingDayKey
 } from './trading-engine.js';
 import { ALERT_COOLDOWN_MS, alertRules, calculateSignal, canEmitAlert } from './signal-engine.js';
+import {
+  HOT_POOL_HARD_MAX, planMemoryGuard, pruneMemoryState, readHotPoolConfig, readProcessMemory,
+  runInstantTicks, selectHotPool
+} from './hot-pool.js';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const publicDir = join(root, 'public');
@@ -28,7 +32,6 @@ const BINANCE_ALPHA_WS = 'wss://nbstream.binance.com/w3w/wsa/stream';
 const CACHE_MS = 5_000;
 const LIVE_PRICE_MAX_AGE_MS = 4_000;
 const LIVE_BROADCAST_MS = 80;
-const MAX_HISTORY = 240;
 const MAX_ALERTS = 300;
 const STATE_PERSIST_MS = 5 * 60_000;
 const PERFORMANCE_HORIZONS = { '5m':5 * 60_000, '15m':15 * 60_000, '1h':60 * 60_000, '4h':4 * 60 * 60_000 };
@@ -52,6 +55,11 @@ let alphaSocketLastEvent = 0;
 let alphaSocketReconnect = null;
 const livePrices = new Map();
 const tokenByAlphaId = new Map();
+const tokenByAddress = new Map();
+let hotConfig = readHotPoolConfig(process.env);
+const hotPool = { byAddress: new Map(), rebuiltAt: 0, degraded: false, guard: null, pruned: null };
+const hotRecomputeAt = new Map();
+const hotStats = { recomputes:0, skippedCold:0, skippedDebounce:0, skippedDegraded:0, sampled:0, alerts:0, failed:0 };
 const sseClients = new Set();
 const pendingLiveUpdates = new Map();
 let liveBroadcastTimer = null;
@@ -368,7 +376,7 @@ async function loadPersistentState() {
       saved = JSON.parse(await readFile(legacyStateFile, 'utf8'));
     }
     for (const [key, rows] of saved.histories || []) {
-      const normalized = Array.isArray(rows) ? rows.slice(-MAX_HISTORY).map((row) => Array.isArray(row)
+      const normalized = Array.isArray(rows) ? rows.slice(-hotConfig.historyCap).map((row) => Array.isArray(row)
         ? { t:Number(row[0]) || 0, price:Number(row[1]) || 0, volume:Number(row[2]) || 0, score:Number(row[3]) || 0 }
         : row
       ).filter((row) => row?.t && row?.price) : [];
@@ -832,7 +840,7 @@ async function persistState() {
     const tempFile = `${stateFile}.tmp`;
     const compactHistories = [...histories.entries()].map(([key, rows]) => [
       key,
-      rows.slice(-MAX_HISTORY).map((row) => [row.t, row.price, row.volume || 0, row.score || 0])
+      rows.slice(-(hotPool.guard?.historyCap || hotConfig.historyCap)).map((row) => [row.t, row.price, row.volume || 0, row.score || 0])
     ]);
     const payload = JSON.stringify({
       version:2, savedAt:Date.now(), histories:compactHistories, alerts,
@@ -878,27 +886,27 @@ function broadcastEvent(name, value) {
   }
 }
 
-function processAlerts(tokens, now) {
-  const candidates = [];
-  for (const token of tokens) {
-    if (token.offline || token.chainId !== '56') continue;
-    const transitioned = [];
-    for (const rule of alertRules(token)) {
-      const key = `${token.address}:${rule.type}`;
-      const previous = alertStates.get(key) || { active:false, lastAlertAt:0 };
-      if (canEmitAlert(rule, previous, now, ALERT_COOLDOWN_MS)) transitioned.push({ token, rule, key });
-      alertStates.set(key, { active:rule.active, lastAlertAt:previous.lastAlertAt });
-    }
-    if (transitioned.length) candidates.push(transitioned.sort((a,b)=>b.rule.priority-a.rule.priority)[0]);
+function transitionForToken(token, now) {
+  if (!token?.address || !token.metrics || token.offline || token.chainId !== '56') return null;
+  const transitioned = [];
+  for (const rule of alertRules(token)) {
+    const key = `${token.address}:${rule.type}`;
+    const previous = alertStates.get(key) || { active:false, lastAlertAt:0 };
+    if (canEmitAlert(rule, previous, now, ALERT_COOLDOWN_MS)) transitioned.push({ token, rule, key });
+    alertStates.set(key, { active:rule.active, lastAlertAt:previous.lastAlertAt });
   }
+  if (!transitioned.length) return null;
+  return transitioned.sort((a,b)=>b.rule.priority-a.rule.priority)[0];
+}
 
+function emitSelectedAlerts(candidates, now, limit, via = 'rest') {
   candidates.sort((a,b)=>b.rule.priority-a.rule.priority || b.token.score-a.token.score);
-  const selected = candidates.slice(0, alertEnginePrimed ? 30 : 12);
+  const selected = candidates.slice(0, limit);
   for (const { token, rule, key } of selected) {
     if (!firstSignalAt.has(token.address)) firstSignalAt.set(token.address, now);
     const alert = {
       id:`${now}-${++alertSequence}`, type:rule.type, level:rule.level,
-      label:rule.label, message:rule.message, createdAt:now,
+      label:rule.label, message:rule.message, createdAt:now, via,
       firstSignalAt:firstSignalAt.get(token.address) || now,
       symbol:token.symbol, name:token.name, address:token.address, alphaId:token.alphaId, chainId:token.chainId,
       icon:token.icon, score:token.score, stage:token.stage, action:token.action,
@@ -912,9 +920,139 @@ function processAlerts(tokens, now) {
     broadcastEvent('alert', alert);
   }
   if (alerts.length > MAX_ALERTS) alerts.splice(0, alerts.length - MAX_ALERTS);
+  if (selected.length) schedulePersist();
+  return selected.length;
+}
+
+function processAlerts(tokens, now) {
+  const candidates = [];
+  for (const token of tokens) {
+    const transition = transitionForToken(token, now);
+    if (transition) candidates.push(transition);
+  }
+  emitSelectedAlerts(candidates, now, alertEnginePrimed ? 30 : 12, 'rest');
   alertEnginePrimed = true;
   for (const token of tokens) token.firstSignalAt = firstSignalAt.get(token.address) || null;
-  if (selected.length) schedulePersist();
+}
+
+function currentMemoryGuard() {
+  return planMemoryGuard(hotConfig, readProcessMemory());
+}
+
+function hotPoolSummary(guard = hotPool.guard) {
+  const reasons = { position:0, managed:0, alert:0, score:0, early:0 };
+  const symbols = [];
+  for (const member of hotPool.byAddress.values()) {
+    if (symbols.length < 64) symbols.push(member.symbol || member.address);
+    for (const reason of member.reasons) if (reasons[reason] !== undefined) reasons[reason] += 1;
+  }
+  return {
+    size: hotPool.byAddress.size,
+    max: guard?.hotPoolMax ?? hotConfig.hotPoolMax,
+    configuredMax: hotConfig.hotPoolMax,
+    hardMax: HOT_POOL_HARD_MAX,
+    degraded: guard ? Boolean(guard.pressure) : Boolean(hotPool.degraded),
+    rebuiltAt: hotPool.rebuiltAt || null,
+    debounceMs: hotConfig.debounceMs,
+    historySampleMs: hotConfig.historySampleMs,
+    reasons, symbols,
+    recomputes: hotStats.recomputes,
+    skippedCold: hotStats.skippedCold,
+    skippedDebounce: hotStats.skippedDebounce,
+    skippedDegraded: hotStats.skippedDegraded,
+    sampled: hotStats.sampled,
+    alerts: hotStats.alerts,
+    failed: hotStats.failed,
+    pruned: hotPool.pruned
+  };
+}
+
+function rebuildHotPool(tokens, now, guard) {
+  const selected = selectHotPool(tokens, {
+    positionAddresses: Object.keys(paperPortfolio.positions),
+    managedAddresses: Object.keys(tradingState.managedPositions),
+    recentAlerts: alerts,
+    maxSize: guard.hotPoolMax,
+    now,
+    recentAlertMs: hotConfig.recentAlertMs,
+    highScore: hotConfig.highScore,
+    earlyScore: hotConfig.earlyScore
+  });
+  const next = new Map();
+  for (const member of selected) next.set(member.address, member);
+  hotPool.byAddress = next;
+  hotPool.rebuiltAt = now;
+  hotPool.degraded = guard.pressure;
+  hotPool.guard = guard;
+  hotRecomputeAt.clear();
+  hotPool.pruned = pruneMemoryState({
+    histories, chainEventLog, chainLiquidityHistory, chainHolderState,
+    keepAddresses: next,
+    historyCap: guard.historyCap,
+    maxTrackedHistories: guard.maxTrackedHistories,
+    maxChainTokens: guard.maxChainTokens
+  });
+}
+
+function refreshHotPool(now = Date.now()) {
+  try {
+    if (!cache.tokens.length) return;
+    rebuildHotPool(cache.tokens, now, currentMemoryGuard());
+  } catch (error) {
+    console.error(`Hot pool update failed: ${error.message}`);
+  }
+}
+
+function recomputeHotUpdates(updates, now) {
+  if (!updates.length || !hotPool.byAddress.size) return;
+  let result;
+  try {
+    const guard = currentMemoryGuard();
+    hotPool.degraded = guard.pressure;
+    result = runInstantTicks({
+      updates,
+      tokenByAddress,
+      hotByAddress: hotPool.byAddress,
+      lastRecomputeAt: hotRecomputeAt,
+      histories,
+      now,
+      debounceMs: hotConfig.debounceMs,
+      historySampleMs: hotConfig.historySampleMs,
+      historyCap: guard.historyCap,
+      skipNonCritical: guard.skipNonCriticalInstant,
+      sampleHistory: !guard.pressure,
+      calculateSignal
+    });
+  } catch (error) {
+    console.error(`Hot recompute failed: ${error.message}`);
+    return;
+  }
+  hotStats.recomputes += result.rescored.length;
+  hotStats.skippedCold += result.skipped.cold || 0;
+  hotStats.skippedDebounce += result.skipped.debounced || 0;
+  hotStats.skippedDegraded += result.skipped.degraded || 0;
+  hotStats.sampled += result.sampled;
+  hotStats.failed += result.skipped.failed || 0;
+  if (!result.updated.length) return;
+  const candidates = [];
+  for (const item of result.updated) {
+    try {
+      const transition = transitionForToken(item.token, now);
+      if (transition) candidates.push(transition);
+    } catch (error) {
+      console.error(`Hot alert check failed: ${error.message}`);
+    }
+    const alphaId = String(item.token.alphaId || '').toUpperCase();
+    if (alphaId) {
+      queueLiveUpdate({
+        alphaId, price:item.token.price, eventTime:now, receivedAt:now, source:'Binance Alpha WS',
+        change24h:item.token.change24h, high24h:item.token.high24h, low24h:item.token.low24h,
+        volume24h:item.token.volume24h, score:item.token.score, stage:item.token.stage, hot:true
+      });
+    }
+  }
+  hotStats.alerts += emitSelectedAlerts(candidates, now, alertEnginePrimed ? 30 : 12, 'ws');
+  for (const item of result.updated) item.token.firstSignalAt = firstSignalAt.get(item.token.address) || null;
 }
 
 function applyLiveTicker(row) {
@@ -946,6 +1084,14 @@ function applyLiveTicker(row) {
     token.priceSource = 'Binance Alpha WS';
   }
   queueLiveUpdate(update);
+  if (!token?.address || !hotPool.byAddress.has(token.address)) {
+    if (token?.address) hotStats.skippedCold += 1;
+    return null;
+  }
+  return {
+    address: token.address, alphaId, price: update.price, change24h: update.change24h,
+    high24h: update.high24h, low24h: update.low24h
+  };
 }
 
 function scheduleSocketReconnect() {
@@ -971,7 +1117,12 @@ function startAlphaSocket() {
         const message = JSON.parse(String(event.data));
         if (!Array.isArray(message.data)) return;
         alphaSocketLastEvent = Date.now();
-        for (const row of message.data) applyLiveTicker(row);
+        const updates = [];
+        for (const row of message.data) {
+          const update = applyLiveTicker(row);
+          if (update) updates.push(update);
+        }
+        if (updates.length) recomputeHotUpdates(updates, Date.now());
       } catch (error) { console.error(`Realtime message failed: ${error.message}`); }
     });
     alphaSocket.addEventListener('close', () => {
@@ -1058,22 +1209,26 @@ async function refreshTokens(force = false) {
     const body = await response.json();
     const rawTokens = Array.isArray(body.data) ? body.data : [];
     const now = Date.now();
+    const guard = currentMemoryGuard();
     const tokens = rawTokens.map((raw) => {
       const key = String(raw.contractAddress || raw.tokenId).toLowerCase();
       const history = histories.get(key) || [];
       const chainIntel = summarizeChainIntel(key,num(raw.liquidity),now);
       const token = normalizeToken(raw, history,chainIntel);
+      token.bookVolume24h = token.volume24h;
       history.push({ t: now, price: token.price, volume: token.volume24h, score: token.score });
-      if (history.length > MAX_HISTORY) history.splice(0, history.length - MAX_HISTORY);
+      if (history.length > guard.historyCap) history.splice(0, history.length - guard.historyCap);
       histories.set(key, history);
       token.sparkline5m = sparkline(history, now);
       token.sparkline15m = sparkline(history, now, 15 * 60_000, 48);
       return token;
     });
     tokenByAlphaId.clear();
+    tokenByAddress.clear();
     for (const token of tokens) {
       const alphaId = String(token.alphaId || '').toUpperCase();
       tokenByAlphaId.set(alphaId, token);
+      if (token.address) tokenByAddress.set(token.address, token);
       const live = livePrices.get(alphaId);
       const liveFresh = live && now - (live.receivedAt || live.eventTime) <= LIVE_PRICE_MAX_AGE_MS;
       if (!liveFresh) {
@@ -1099,6 +1254,7 @@ async function refreshTokens(force = false) {
     recordPerformanceData(tokens, now);
     cache = { fetchedAt: now, tokens, source: 'Binance Alpha', error: null };
     await evaluateAutoTrading(tokens, now);
+    refreshHotPool(Date.now());
     schedulePersist();
   } catch (error) {
     cache = { ...cache, error: error.message, source: cache.tokens.length ? 'cached' : 'unavailable' };
@@ -1160,6 +1316,7 @@ async function api(req, res, url) {
       for (const event of additions) recordTradingEvent(event);
       await persistAutoTrading();
     }
+    refreshHotPool(now);
     return json(res, { persisted:true, portfolio:paperPortfolio });
   }
   if (url.pathname === '/api/trading') {
@@ -1179,13 +1336,24 @@ async function api(req, res, url) {
     tradingState.pausedReason = tradingConfig.enabled ? null : '策略已暂停';
     await persistAutoTrading();
     if (tradingConfig.enabled) await evaluateAutoTrading(cache.tokens, Date.now());
+    refreshHotPool(Date.now());
     return json(res, tradingOverview());
   }
   if (url.pathname === '/api/health') {
+    const memory = readProcessMemory();
+    const guard = currentMemoryGuard();
     return json(res, {
-      ok: true, version: '0.8.0', mode: 'unattended', pollingMs: CACHE_MS,
+      ok: true, version: '0.9.0', mode: 'unattended', pollingMs: CACHE_MS,
       now: Date.now(), lastRefresh: cache.fetchedAt, cachedTokens: cache.tokens.length,
       histories: histories.size, alerts:alerts.length, performanceDatabase:Boolean(performanceDb), source: cache.source, error: cache.error,
+      memory: {
+        rss: memory.rss, heapUsed: memory.heapUsed, heapTotal: memory.heapTotal, external: memory.external,
+        rssMb: memory.rssMb, heapUsedMb: memory.heapUsedMb, heapTotalMb: memory.heapTotalMb,
+        pressure: guard.pressure, rssSoftMb: hotConfig.rssSoftMb,
+        historyCap: guard.historyCap, trackedHistories: histories.size,
+        maxTrackedHistories: guard.maxTrackedHistories
+      },
+      hotPool: hotPoolSummary(guard),
       chainIntel: { ...okxIntelStatus, eventTokens:chainEventLog.size, liquidityTokens:chainLiquidityHistory.size, holderTokens:chainHolderState.size },
       trading: {
         enabled:tradingConfig.enabled, executionMode:tradingConfig.executionMode,
@@ -1269,13 +1437,14 @@ server.listen(port, '127.0.0.1', () => {
   console.log(`AlphaPulse running at http://127.0.0.1:${port}`);
   startAlphaSocket();
   loadEnvironmentFile()
+    .then(() => { hotConfig = readHotPoolConfig(process.env); })
     .then(() => loadPersistentState())
     .then(() => loadPaperPortfolio())
     .then(() => loadAutoTrading())
     .then(() => initializePerformanceDatabase())
     .then(() => startOkxChainIntel())
     .then(() => monitorTick())
-    .then(() => console.log(`Loaded ${cache.tokens.length} Binance Alpha tokens; unattended monitor active`));
+    .then(() => console.log(`Loaded ${cache.tokens.length} Binance Alpha tokens; hot pool ${hotPool.byAddress.size}/${hotConfig.hotPoolMax}; unattended monitor active`));
   setInterval(monitorTick, CACHE_MS);
 });
 

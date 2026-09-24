@@ -1,6 +1,6 @@
 # AlphaPulse · 阿尔法脉冲
 
-Binance Alpha（BSC）链上异动监控控制台第一版。它通过 Binance Alpha 官方 WebSocket 接收实时价格，并每 5 秒校准完整市场快照，根据价格、成交额、市值、流动性、交易数、持币地址与 FDV 计算研究型信号。
+Binance Alpha（BSC）链上异动监控控制台。它通过 Binance Alpha 官方 WebSocket 接收实时价格，对一小部分热池代币即时重算短窗评分和提醒，并每 5 秒用 REST 校准完整市场快照。评分使用价格、成交额、市值、流动性、交易数、持币地址与 FDV。这一阶段只用免费的 Binance Alpha 数据，不需要 OKX。
 
 ## 启动
 
@@ -17,7 +17,9 @@ npm start
 
 - 自动读取 Binance Alpha 官方完整代币池；默认筛选 BSC（Chain 56）
 - Binance Alpha 官方 WebSocket 实时价格推送，断线自动重连
-- 5 秒完整行情快照、指标校准与 REST 备用数据源
+- 热池即时重算：模拟仓、自动管理仓、近 2 小时提醒、评分达到 62 的币，以及评分达到 42 且处于潜伏/启动的早期候选，会在 WebSocket 价格到达后更新短窗指标、评分、阶段和提醒边沿。热池默认最多 48 个，硬上限 64
+- 不在热池里的币只更新价格，评分和提醒仍等到 5 秒 REST 快照。即时重算默认每个币 300ms 最多一次
+- 5 秒完整行情快照仍是流动性、持币地址、24H 成交和上线信息的准绳，也负责冷币评分
 - 异动优先、拉升榜、资金热度、风险榜
 - 试仓、重点观察、减仓、回避四级建议
 - 单币详情、24 小时区间、评分正负因素
@@ -46,7 +48,7 @@ npm start
 - 自动硬止损、结构性风险退出、单日开仓与亏损上限；价格达到买入均价 2 倍时按实际成本精确卖出并收回本金
 - 加仓后按总成本/总数量更新加权均价；自动管理仓位会同步新增本金和新的 2 倍出本价
 - 自动交易中心：启停开关、风控参数、当前候选、管理中持仓与执行记录，状态持久化到 `data/auto-trading.json`
-- 服务端持续接收实时行情并每 5 秒主动校准，网页关闭后仍持续监控
+- 服务端持续接收实时行情：热池走 WebSocket 即时重算，全市场每 5 秒校准，网页关闭后仍持续监控
 - Windows 登录自启、异常自动重启和历史状态落盘
 - 分层策略快照：持仓/高评分/近期告警每分钟记录，普通资产每 5 分钟记录
 - Gzip 紧凑历史状态、五分钟状态落盘和 15 秒策略结果评估
@@ -84,6 +86,35 @@ bash /workspace/alphapulse/scripts/backup-cloud.sh
 
 备份默认保存在 `/workspace/alphapulse-backups/<UTC时间>/`，包含模拟仓、自动交易状态、压缩监控状态和通过 SQLite `VACUUM INTO` 生成的一致性数据库副本；默认保留 14 天。建议在 Grok Bot 中创建两个 Routine：每 5 分钟运行健康检查（成功时保持静默，恢复失败时通知），每天运行一次备份。
 
+`/api/health` 的 `memory` 给出 RSS、堆占用和是否处于内存承压；`hotPool.size` 是当前热池大小，`hotPool.max` 是当前上限。健康检查脚本只判断 `"ok":true`，这些字段给运维看压力用。
+
+## 热池与内存（Phase 2，仅免费数据）
+
+即时路径只服务热池，避免 600 多个币每个 ticker 都重算。成员按这个顺序挤进上限：模拟仓、自动管理仓、近 2 小时提醒、高分观察、早期阶段。同一币占一个名额。
+
+历史点仍主要由 5 秒 REST 写入。热池只有在距离上一个历史点至少 5 秒时才补一个点，因此不会每个 tick 追加一行，15 分钟窗口也不会被 1 秒级数据挤掉。承压时连这个补点也停掉。
+
+OKX 仍然可选。不配置凭据、不设置 `OKX_CHAIN_INTEL_ENABLED=true` 时，热池即时重算照常工作。
+
+| 变量 | 默认 | 作用 |
+| --- | --- | --- |
+| `ALPHAPULSE_HOT_POOL_MAX` | 48 | 热池上限，允许 8–64 |
+| `ALPHAPULSE_HOT_DEBOUNCE_MS` | 300 | 单币重算间隔，限制在 200–500 |
+| `ALPHAPULSE_HOT_HISTORY_SAMPLE_MS` | 5000 | 热池补历史点的最小间隔 |
+| `ALPHAPULSE_HOT_ALERT_WINDOW_MS` | 7200000 | 最近提醒进入热池的时间窗 |
+| `ALPHAPULSE_HOT_SCORE` | 62 | 高分观察门槛 |
+| `ALPHAPULSE_HOT_EARLY_SCORE` | 42 | 潜伏/启动进入热池的分数门槛 |
+| `ALPHAPULSE_MAX_HISTORY` | 240 | 单币历史长度，不能超过原来的 240，最低 30 |
+| `ALPHAPULSE_RSS_SOFT_MB` | 512 | RSS 达到后缩小热池、缩短历史，并跳过非持仓/非提醒的即时重算。设为 0 关闭 |
+| `ALPHAPULSE_PRESSURE_HOT_POOL_MAX` | 16 | 承压时的热池上限 |
+| `ALPHAPULSE_PRESSURE_HISTORY_CAP` | 120 | 承压时的单币历史长度 |
+| `ALPHAPULSE_MAX_TRACKED_HISTORIES` | 900 | 内存里保留价格历史的币种数 |
+| `ALPHAPULSE_PRESSURE_MAX_HISTORIES` | 180 | 承压时保留的历史币种数，热池优先留下 |
+| `ALPHAPULSE_MAX_CHAIN_TOKENS` | 400 | 链上事件缓存的币种数 |
+| `ALPHAPULSE_PRESSURE_MAX_CHAIN_TOKENS` | 24 | 承压时的链上缓存币种数 |
+
+承压只降级，不让进程崩溃。持仓和近 2 小时提醒仍会即时重算。
+
 ## OKX 链上资金数据
 
 Smart Money 和逐笔 Swap 数据通过 OKX Onchain OS 官方 WebSocket 接入，需要在 OKX Developer Portal 创建 Market API 凭据。凭据只保存在本机 `.env`，不会发送到网页或写入数据库。
@@ -95,7 +126,7 @@ cd D:\Alpha
 .\scripts\configure-okx-chain-intel.ps1
 ```
 
-配置后重新启动 `AlphaPulse Monitor` 计划任务。系统会全局监听 BSC Smart Money/KOL 活动，并动态订阅评分最高或近期触发提醒的 24 个币种的逐笔成交与池子指标。未配置凭据时，Binance Alpha 行情监控会继续正常运行，链上资金卡片显示“待配置”。
+配置后重新启动 `AlphaPulse Monitor` 计划任务。系统会全局监听 BSC Smart Money/KOL 活动，并动态订阅评分最高或近期触发提醒的 24 个币种的逐笔成交与池子指标。未配置凭据时，Binance Alpha 行情监控和热池即时重算会继续正常运行，链上资金卡片显示“待配置”。OKX 不是 Phase 2 的依赖。
 
 ## 自动交易安全边界
 
@@ -111,8 +142,9 @@ cd D:\Alpha
 
 ## 下一阶段
 
-1. Phase 1（当前）：提前评分、早期启动提醒和「以小博大」预设已经接上。自动执行仍然只做模拟仓，默认关闭，不会因为这套更早的研究信号而改成激进实盘。
-2. Phase 2：按 Binance WebSocket 逐笔即时重算全市场，并增加 Telegram/飞书推送。现在的提醒仍跟 5 秒 REST 校准走。
-3. Phase 3：Binance Alpha 新增/下线事件流、四小时倒计时，以及 GoPlus 安全扫描。
-4. 按策略胜率自动调整评分权重，并增加样本置信区间。
-5. 真实订单的待确认队列和执行回执。不保存私钥，也不做无人值守的真实下单。
+1. Phase 1：提前评分、早期启动提醒和「以小博大」预设已经接上。自动执行仍然只做模拟仓，默认关闭，不会因为这套更早的研究信号而改成激进实盘。
+2. Phase 2（当前）：热池内用免费 Binance Alpha WebSocket 即时重算短窗评分、阶段和提醒。不全市场逐笔重算，也不接入 OKX 付费接口。
+3. Telegram / 飞书推送。
+4. Phase 3：Binance Alpha 新增/下线事件流、四小时倒计时，以及 GoPlus 安全扫描。
+5. 按策略胜率自动调整评分权重，并增加样本置信区间。
+6. 真实订单的待确认队列和执行回执。不保存私钥，也不做无人值守的真实下单。
