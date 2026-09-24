@@ -239,7 +239,7 @@ function renderAlerts() {
   const items = [...grouped.values()];
   $('alertList').innerHTML = items.length ? items.map((item) => `
     <button class="alert-item level-${escapeHtml(item.level)}" data-address="${escapeHtml(item.address)}">
-      <span class="alert-icon"><span>${escapeHtml(item.symbol.slice(0,2))}</span>${iconUrl(item) ? `<img src="${escapeHtml(iconUrl(item))}" alt="" onerror="this.remove()">` : ''}</span>
+      <span class="alert-icon"><span>${escapeHtml(String(item.symbol || '—').slice(0,2))}</span>${iconUrl(item) ? `<img src="${escapeHtml(iconUrl(item))}" alt="" onerror="this.remove()">` : ''}</span>
       <span class="alert-body"><span class="alert-title"><b>${escapeHtml(item.symbol)}</b><em>${escapeHtml(item.label)}</em>${item.groupCount > 1 ? `<span class="alert-count">${item.groupCount} 条</span>` : ''}<time>${relativeTime(item.createdAt)}</time></span>
       <strong>${escapeHtml(item.message)}</strong><small>评分 ${item.score} · ${escapeHtml(item.stage || '观察')} · 首次异动 ${new Date(item.firstSignalAt).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false})}</small>
       <span class="alert-actions"><span class="alert-mute" data-mute-address="${escapeHtml(item.address)}">屏蔽币种</span><span class="alert-rule-mute" data-mute-rule="${escapeHtml(item.type)}">暂停规则</span></span></span>

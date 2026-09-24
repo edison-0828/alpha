@@ -16,6 +16,10 @@ import {
   HOT_POOL_HARD_MAX, planMemoryGuard, pruneMemoryState, readHotPoolConfig, readProcessMemory,
   runInstantTicks, selectHotPool
 } from './hot-pool.js';
+import {
+  createListingWatch, diffAlphaListings, exportListingWatch, hydrateListingWatch,
+  listingWatchSummary, readListingWatchConfig, recentListingAddresses, toListingAlert
+} from './listing-watch.js';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const publicDir = join(root, 'public');
@@ -57,6 +61,8 @@ const livePrices = new Map();
 const tokenByAlphaId = new Map();
 const tokenByAddress = new Map();
 let hotConfig = readHotPoolConfig(process.env);
+let listingConfig = readListingWatchConfig(process.env);
+let listingWatch = createListingWatch();
 const hotPool = { byAddress: new Map(), rebuiltAt: 0, degraded: false, guard: null, pruned: null };
 const hotRecomputeAt = new Map();
 const hotStats = { recomputes:0, skippedCold:0, skippedDebounce:0, skippedDegraded:0, sampled:0, alerts:0, failed:0 };
@@ -391,6 +397,11 @@ async function loadPersistentState() {
       if (!previous || alert.createdAt < previous) firstSignalAt.set(alert.address, alert.createdAt);
     }
     alertEnginePrimed = alertStates.size > 0;
+    try {
+      if (saved.listingWatch) listingWatch = hydrateListingWatch(saved.listingWatch, listingConfig.snapshotCap);
+    } catch (error) {
+      console.error(`Listing watch restore failed: ${error.message}`);
+    }
     console.log(`Restored ${histories.size} token histories and ${alerts.length} alerts`);
   } catch (error) {
     if (error.code !== 'ENOENT') console.error(`State restore failed: ${error.message}`);
@@ -844,7 +855,8 @@ async function persistState() {
     ]);
     const payload = JSON.stringify({
       version:2, savedAt:Date.now(), histories:compactHistories, alerts,
-      alertStates:[...alertStates.entries()], firstSignalAt:[...firstSignalAt.entries()]
+      alertStates:[...alertStates.entries()], firstSignalAt:[...firstSignalAt.entries()],
+      listingWatch:exportListingWatch(listingWatch, listingConfig.snapshotCap)
     });
     const compressed = await gzip(payload, { level:6 });
     await writeFile(tempFile, compressed);
@@ -924,6 +936,33 @@ function emitSelectedAlerts(candidates, now, limit, via = 'rest') {
   return selected.length;
 }
 
+function emitListingAlerts(events, now) {
+  let emitted = 0;
+  for (const event of events || []) {
+    const alert = toListingAlert(event, now, `${now}-list-${++alertSequence}`);
+    if (alert.address && !firstSignalAt.has(alert.address)) firstSignalAt.set(alert.address, now);
+    alert.firstSignalAt = alert.address ? (firstSignalAt.get(alert.address) || now) : now;
+    alerts.push(alert);
+    insertSignalRecord(alert);
+    if (alert.address) alertStates.set(`${alert.address}:${alert.type}`, { active:true, lastAlertAt:now });
+    broadcastEvent('alert', alert);
+    console.log(`${alert.label} ${alert.symbol} ${alert.address || alert.alphaId}`);
+    emitted += 1;
+  }
+  if (alerts.length > MAX_ALERTS) alerts.splice(0, alerts.length - MAX_ALERTS);
+  if (emitted) schedulePersist();
+  return emitted;
+}
+
+function watchListings(tokens, now) {
+  try {
+    const result = diffAlphaListings(listingWatch, tokens, now, listingConfig);
+    if (result.events.length) emitListingAlerts(result.events, now);
+  } catch (error) {
+    console.error(`Listing watch failed: ${error.message}`);
+  }
+}
+
 function processAlerts(tokens, now) {
   const candidates = [];
   for (const token of tokens) {
@@ -940,7 +979,7 @@ function currentMemoryGuard() {
 }
 
 function hotPoolSummary(guard = hotPool.guard) {
-  const reasons = { position:0, managed:0, alert:0, score:0, early:0 };
+  const reasons = { position:0, managed:0, listing:0, alert:0, score:0, early:0 };
   const symbols = [];
   for (const member of hotPool.byAddress.values()) {
     if (symbols.length < 64) symbols.push(member.symbol || member.address);
@@ -971,6 +1010,7 @@ function rebuildHotPool(tokens, now, guard) {
   const selected = selectHotPool(tokens, {
     positionAddresses: Object.keys(paperPortfolio.positions),
     managedAddresses: Object.keys(tradingState.managedPositions),
+    listingAddresses: recentListingAddresses(listingWatch, now, listingConfig.hotMs),
     recentAlerts: alerts,
     maxSize: guard.hotPoolMax,
     now,
@@ -1250,6 +1290,7 @@ async function refreshTokens(force = false) {
       token.priceSource = 'Binance Alpha WS';
     }
     processAlerts(tokens, now);
+    watchListings(tokens, now);
     syncOkxPriorityTokens(tokens);
     recordPerformanceData(tokens, now);
     cache = { fetchedAt: now, tokens, source: 'Binance Alpha', error: null };
@@ -1354,6 +1395,7 @@ async function api(req, res, url) {
         maxTrackedHistories: guard.maxTrackedHistories
       },
       hotPool: hotPoolSummary(guard),
+      listingWatch: listingWatchSummary(listingWatch, listingConfig),
       chainIntel: { ...okxIntelStatus, eventTokens:chainEventLog.size, liquidityTokens:chainLiquidityHistory.size, holderTokens:chainHolderState.size },
       trading: {
         enabled:tradingConfig.enabled, executionMode:tradingConfig.executionMode,
@@ -1437,14 +1479,17 @@ server.listen(port, '127.0.0.1', () => {
   console.log(`AlphaPulse running at http://127.0.0.1:${port}`);
   startAlphaSocket();
   loadEnvironmentFile()
-    .then(() => { hotConfig = readHotPoolConfig(process.env); })
+    .then(() => {
+      hotConfig = readHotPoolConfig(process.env);
+      listingConfig = readListingWatchConfig(process.env);
+    })
     .then(() => loadPersistentState())
     .then(() => loadPaperPortfolio())
     .then(() => loadAutoTrading())
     .then(() => initializePerformanceDatabase())
     .then(() => startOkxChainIntel())
     .then(() => monitorTick())
-    .then(() => console.log(`Loaded ${cache.tokens.length} Binance Alpha tokens; hot pool ${hotPool.byAddress.size}/${hotConfig.hotPoolMax}; unattended monitor active`));
+    .then(() => console.log(`Loaded ${cache.tokens.length} Binance Alpha tokens; hot pool ${hotPool.byAddress.size}/${hotConfig.hotPoolMax}; listing watch ${listingWatch.seen.size}; unattended monitor active`));
   setInterval(monitorTick, CACHE_MS);
 });
 

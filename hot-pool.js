@@ -11,7 +11,7 @@ export const DEFAULT_HIGH_SCORE = 62;
 export const DEFAULT_EARLY_SCORE = 42;
 export const EARLY_STAGES = new Set(['潜伏', '启动']);
 
-const REASON_RANK = { position: 50, managed: 40, alert: 30, score: 20, early: 10 };
+const REASON_RANK = { position: 50, managed: 40, listing: 35, alert: 30, score: 20, early: 10 };
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -139,10 +139,10 @@ export function selectHotPool(tokens, options = {}) {
     if (alertAt > member.alertAt) member.alertAt = alertAt;
   };
 
+  const now = num(options.now) || Date.now();
   for (const address of options.positionAddresses || []) addReason(address, 'position', true);
   for (const address of options.managedAddresses || []) addReason(address, 'managed', true);
-
-  const now = num(options.now) || Date.now();
+  for (const address of options.listingAddresses || []) addReason(address, 'listing', true, now);
   const cutoff = now - (num(options.recentAlertMs) || DEFAULT_RECENT_ALERT_MS);
   const seenAlerts = new Set();
   const alertRows = [];
