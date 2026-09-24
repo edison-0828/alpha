@@ -1,11 +1,4 @@
-const defaultRules = {
-  minScore: 0, minLiquidity: 0, minMarketCap: 0, minHolders: 0,
-  minChange: -100, maxChange: 10000, minTurnover: 0, maxDilution: 100,
-  minChange5m: -100, minFlow5m: 0, maxRange: 10000, minSamples: 0,
-  minSmartNet: 0, minLargeSwap: 0, minLiquidityChange: -100, maxTop10: 100,
-  excludeThin: false, excludeBots: false, excludeDilution: false, onlyQuality: false,
-  requireConfluence: false, requireAcceleration: false, excludeExhaustion: false, excludeNew: false
-};
+import { defaultScreeningRules as defaultRules, passesScreeningRules, screeningPresets as presets } from './screening-rules.js';
 const PAPER_KEY = 'alpha-radar-paper-v1';
 const ALERT_SEEN_KEY = 'alpha-radar-alert-seen-v1';
 const ALERT_NOTIFY_KEY = 'alpha-radar-alert-notify-v1';
@@ -653,6 +646,7 @@ function adviceText(token) {
   if (token.stage === '衰竭') return '短周期动量已经转弱，优先等待重新放量站稳，避免接力追高。';
   if (token.stage === '过热') return '价格处于过热区，信号强但盈亏比下降，等待回踩确认更稳妥。';
   if (token.stage === '启动') return '成交增量正在加速，但多周期趋势尚未完全确认，适合小仓观察。';
+  if (token.stage === '潜伏') return '短周期刚开始转强，仍在早期，适合小仓跟踪而不是按 24H 涨幅追入。';
   if (token.action === '试仓') return '多项指标共振，但建议仅小仓验证并设置止损。';
   if (token.action === '重点观察') return '异动成立，等待回踩、流动性或独立买盘进一步确认。';
   if (token.action === '减仓') return '高换手伴随明显回撤，优先保护利润并避免补仓摊薄。';
@@ -711,34 +705,7 @@ function applyFilters() {
   let list = state.tokens.filter((t) => !q || `${t.symbol} ${t.name} ${t.address} ${t.alphaId}`.toLowerCase().includes(q));
   if (state.action !== 'all') list = list.filter((t) => t.action === state.action);
   const r = state.rules;
-  list = list.filter((t) => {
-    const flags = t.metrics.riskFlags || {};
-    const dilution = t.metrics.unlockRatio || 0;
-    const chain = t.chainIntel || {};
-    return t.score >= r.minScore
-      && t.liquidity >= r.minLiquidity * 1000
-      && t.marketCap >= r.minMarketCap * 1_000_000
-      && t.holders >= r.minHolders
-      && t.change24h >= r.minChange && t.change24h <= r.maxChange
-      && t.metrics.volumeRatio * 100 >= r.minTurnover
-      && dilution <= r.maxDilution
-      && (r.minChange5m <= -100 || (t.metrics.change5m !== null && t.metrics.change5m >= r.minChange5m))
-      && (r.minFlow5m <= 0 || (t.metrics.flow5mRatio !== null && t.metrics.flow5mRatio * 100 >= r.minFlow5m))
-      && t.metrics.rangePct <= r.maxRange
-      && t.metrics.sampleMinutes >= r.minSamples
-      && (r.minSmartNet <= 0 || (chain.available && chain.smartNetUsd >= r.minSmartNet * 1000))
-      && (r.minLargeSwap <= 0 || (chain.available && chain.largeSwapNetUsd >= r.minLargeSwap * 1000))
-      && (r.minLiquidityChange <= -100 || (chain.available && chain.liquidityChange5m !== null && chain.liquidityChange5m >= r.minLiquidityChange))
-      && (r.maxTop10 >= 100 || (chain.available && chain.top10Percent !== null && chain.top10Percent <= r.maxTop10))
-      && (!r.excludeThin || !flags.thinLiquidity)
-      && (!r.excludeBots || !flags.botLike)
-      && (!r.excludeDilution || !flags.highDilution)
-      && (!r.onlyQuality || t.quality === '高质量')
-      && (!r.requireConfluence || t.metrics.multiWindowConfluence)
-      && (!r.requireAcceleration || t.metrics.volumeAccelerating)
-      && (!r.excludeExhaustion || !t.metrics.exhaustion)
-      && (!r.excludeNew || t.metrics.ageHours >= 24);
-  });
+  list = list.filter((t) => passesScreeningRules(t, r));
   const sorts = {
     signals: (a,b) => b.score - a.score || b.metrics.shortChange - a.metrics.shortChange,
     gainers: (a,b) => b.change24h - a.change24h,
@@ -763,16 +730,6 @@ const ruleFields = {
   excludeExhaustion: 'ruleExcludeExhaustion', excludeNew: 'ruleExcludeNew'
 };
 
-const presets = {
-  breakout: { minScore:55, minLiquidity:200, minMarketCap:2, minHolders:500, minChange:5, maxChange:80, minTurnover:5, maxDilution:5, excludeThin:true, excludeBots:true, excludeDilution:false, onlyQuality:false },
-  confirmed: { minScore:70, minLiquidity:500, minMarketCap:5, minHolders:2000, minChange:3, maxChange:45, minTurnover:8, maxDilution:3, excludeThin:true, excludeBots:true, excludeDilution:true, onlyQuality:false },
-  ake: { minScore:0, minLiquidity:300, minMarketCap:10, minHolders:1000, minChange:15, maxChange:10000, minTurnover:5, maxDilution:10, excludeThin:false, excludeBots:false, excludeDilution:false, onlyQuality:false },
-  safe: { minScore:72, minLiquidity:1000, minMarketCap:10, minHolders:5000, minChange:0, maxChange:30, minTurnover:3, maxDilution:2.5, excludeThin:true, excludeBots:true, excludeDilution:true, onlyQuality:true, excludeExhaustion:true },
-  flowStart: { minScore:58, minLiquidity:300, minMarketCap:2, minHolders:800, minChange:-5, maxChange:40, minTurnover:3, maxDilution:5, minChange5m:-3, minFlow5m:0.05, minSamples:5, requireAcceleration:true, excludeThin:true, excludeBots:true, excludeExhaustion:true },
-  trendConfirm: { minScore:70, minLiquidity:500, minMarketCap:5, minHolders:1500, minChange:2, maxChange:50, minTurnover:5, maxDilution:4, minChange5m:1.2, minFlow5m:0.2, minSamples:15, requireConfluence:true, excludeThin:true, excludeBots:true, excludeExhaustion:true },
-  antiFomo: { minScore:65, minLiquidity:500, minMarketCap:5, minHolders:1000, minChange:0, maxChange:30, minTurnover:3, maxDilution:3, minChange5m:-2, minFlow5m:0.05, maxRange:70, minSamples:15, excludeThin:true, excludeBots:true, excludeDilution:true, excludeExhaustion:true, excludeNew:true },
-  onchainConfirm: { minScore:58, minLiquidity:300, minMarketCap:2, minHolders:800, minChange:-5, maxChange:45, minTurnover:3, maxDilution:5, minSmartNet:25, minLargeSwap:50, minLiquidityChange:-3, maxTop10:80, excludeThin:true, excludeBots:true, excludeExhaustion:true }
-};
 
 function syncRuleInputs(rules = state.rules) {
   Object.entries(ruleFields).forEach(([key,id]) => {
@@ -821,6 +778,7 @@ function updateRuleSummary() {
   if (r.requireAcceleration) items.push('成交加速');
   if (r.excludeExhaustion) items.push('排除衰竭');
   if (r.excludeNew) items.push('排除新币');
+  if (Array.isArray(r.allowedStages) && r.allowedStages.length) items.push(`阶段 ${r.allowedStages.join('/')}`);
   $('activeRuleCount').textContent = items.length;
   $('ruleSummary').textContent = items.length ? `已启用 ${items.length} 条：${items.join(' · ')}` : '当前未启用额外规则';
 }
