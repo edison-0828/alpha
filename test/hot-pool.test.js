@@ -62,6 +62,28 @@ test('hot pool keeps positions, fresh alerts, high scores, and early names withi
   assert.equal(selected.some((item) => item.address === '0xold'), false);
 });
 
+test('new listings outrank high scores and stay critical, while a position keeps the last seat', () => {
+  const tokens = [
+    token({ address: '0xlist', symbol: 'NEW', score: 5, stage: '观察' }),
+    token({ address: '0xhigh', symbol: 'HIGH', score: 99, stage: '过热' }),
+    token({ address: '0xpos', symbol: 'POS', score: 1, stage: '观察' }),
+    token({ address: '0xoff', symbol: 'OFF', score: 1, stage: '启动', offline: true })
+  ];
+  const selected = selectHotPool(tokens, {
+    positionAddresses: ['0xpos'],
+    listingAddresses: ['0xLIST', '0xmissing', '0xoff'],
+    maxSize: 2,
+    now: NOW,
+    highScore: 62,
+    earlyScore: 42
+  });
+  assert.deepEqual(selected.map((item) => item.address), ['0xpos', '0xlist']);
+  const listing = selected.find((item) => item.address === '0xlist');
+  assert.equal(listing.critical, true);
+  assert.equal(listing.reasons.includes('listing'), true);
+  assert.equal(selected.some((item) => item.address === '0xhigh'), false);
+});
+
 test('hot pool prefers a position over a higher score when the cap is full', () => {
   const tokens = [
     token({ address: '0xpos', score: 1 }),
